@@ -11,7 +11,7 @@ import sqlite3
 import unicodedata
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from src.core.config import obtener_usuario_windows
 from src.core.logger import get_logger
@@ -1512,7 +1512,9 @@ class RecordsService:
         for r in reemplazos_rows:
             reemplazos_por_nov.setdefault(r["novedad_id"], []).append(dict(r))
 
-        turnos_map = self.listar_turnos_itinerario_map()
+        wd_sol = f_sol.weekday()
+        reg_sol = "H" if wd_sol < 5 else ("S" if wd_sol == 5 else "D")
+        turnos_map = self.listar_turnos_itinerario_map(regimen=reg_sol)
         from src.domain.validators import resolver_jornada_itinerario
 
         descubiertos = []
@@ -1835,7 +1837,11 @@ class RecordsService:
         fecha_inicio_calc = fecha_primer_dia - timedelta(days=21)
         fecha_fin_calc = date(anio, mes, num_dias)
         jornadas_map = self.obtener_jornadas_ciclo_rango(legajo_ciclo, fecha_inicio_calc, fecha_fin_calc)
-        turnos_itinerario_map = self.listar_turnos_itinerario_map()
+        turnos_maps_por_reg = {
+            "H": self.listar_turnos_itinerario_map(regimen="H"),
+            "S": self.listar_turnos_itinerario_map(regimen="S"),
+            "D": self.listar_turnos_itinerario_map(regimen="D"),
+        }
 
         def _parsear_hm(val_str: Optional[str]) -> Optional[Tuple[int, int]]:
             if not val_str:
@@ -1925,14 +1931,16 @@ class RecordsService:
                 deja = jornada_db.get("deja") or "" if jornada_db else ""
 
                 # Si no hay horario manual ingresado, resolver automáticamente desde turnos_itinerario
-                if not toma and not deja and turno_cubierto and turno_cubierto != "-" and turnos_itinerario_map:
+                reg_step = "H" if d_step.weekday() < 5 else ("S" if d_step.weekday() == 5 else "D")
+                turnos_map_step = turnos_maps_por_reg.get(reg_step, {})
+                if not toma and not deja and turno_cubierto and turno_cubierto != "-" and turnos_map_step:
                     from src.domain.validators import resolver_jornada_itinerario
                     franco_titular = relevo_dia.get("franco_titular") or "Domingo"
                     res_jornada = resolver_jornada_itinerario(
                         turno_base=turno_cubierto,
                         fecha_target=f_iso,
                         franco_agente=franco_titular,
-                        turnos_dict=turnos_itinerario_map,
+                        turnos_dict=turnos_map_step,
                     )
                     if res_jornada.get("es_franco"):
                         es_franco = True
@@ -2266,85 +2274,306 @@ class RecordsService:
     # Itinerarios de Conducción Eléctrica y Buscador por Tren
     # ---------------------------------------------------------
 
-    def importar_itinerario_excel(self, file_path: str, itinerario_nombre: Optional[str] = None) -> Tuple[int, int]:
-        """Importa el archivo normalizado de itinerarios (ej. Indice_45.xlsx) a SQLite."""
+    @staticmethod
+    def normalizar_regimen_turno(valor: Any, default: str = "TODOS") -> str:
+        """Normaliza día/régimen operativo de turno a 'H' (Hábil), 'S' (Sábado), 'D' (Domingo) o 'TODOS'."""
+        raw = str(valor or "").strip()
+        if not raw:
+            return default
+        t = normalizar_texto_estacion(raw).upper()
+        if t in ("TODOS", "TODAS", "ALL", "CUALQUIERA", "SIN DISTINCION"):
+            return "TODOS"
+        if t in ("H", "HABIL", "LV", "LAV", "L-V", "L A V") or "HABIL" in t or "LUNES A VIERNES" in t:
+            return "H"
+        if t in ("S", "SAB", "SABADO") or "SABADO" in t or t.startswith("SAB"):
+            return "S"
+        if t in ("D", "DOM", "DOMINGO", "DF", "DOM / FERIADO") or "DOMINGO" in t or "FERIAD" in t or t.startswith("DOM"):
+            return "D"
+        return default
+
+    @staticmethod
+    def formatear_regimen_turno(regimen: Any) -> str:
+        """Devuelve representación legible para UI y reportes de H/S/D/TODOS."""
+        reg = str(regimen or "TODOS").strip().upper()
+        mapping = {
+            "H": "H (Hábil)",
+            "S": "S (Sábado)",
+            "D": "D (Domingo)",
+            "TODOS": "Todos",
+            "": "Todos",
+        }
+        return mapping.get(reg, reg)
+
+    @staticmethod
+    def _formatear_hora_celda(val: Any) -> str:
+        """Convierte celdas de horario Excel (time, datetime, timedelta o str) a HH:MM."""
+        if val is None:
+            return ""
+        if isinstance(val, datetime):
+            return val.strftime("%H:%M")
+        if isinstance(val, time):
+            return val.strftime("%H:%M")
+        if isinstance(val, timedelta):
+            total_mins = int(round(val.total_seconds() / 60.0)) % (24 * 60)
+            return f"{total_mins // 60:02d}:{total_mins % 60:02d}"
+        if isinstance(val, (int, float)) and not isinstance(val, bool) and 0 <= float(val) < 1:
+            total_mins = int(round(float(val) * 24 * 60)) % (24 * 60)
+            return f"{total_mins // 60:02d}:{total_mins % 60:02d}"
+        s = str(val).strip()
+        if not s or s.lower() == "none":
+            return ""
+        m = re.match(r"^(\d{1,2}):(\d{2})(?::\d{2})?(?:\.\d+)?$", s)
+        if m:
+            h_i = int(m.group(1))
+            if 0 <= h_i <= 23:
+                return f"{h_i:02d}:{m.group(2)}"
+        return s
+
+    @staticmethod
+    def _formatear_texto_celda(val: Any, reemplazar_coma: bool = False) -> str:
+        """Normaliza valores de texto/numéricos de Excel evitando sufijos '.0' espurios."""
+        if val is None:
+            return ""
+        if isinstance(val, bool):
+            return str(val)
+        if isinstance(val, int):
+            s = str(val)
+        elif isinstance(val, float):
+            s = str(int(val)) if val.is_integer() else str(val)
+        else:
+            s = str(val).strip()
+        if s.lower() == "none":
+            return ""
+        if reemplazar_coma:
+            s = s.replace(",", ".")
+        return s
+
+    @staticmethod
+    def _norm_header_col(val: Any) -> str:
+        if val is None:
+            return ""
+        txt = unicodedata.normalize("NFKD", str(val)).encode("ascii", "ignore").decode("ascii").lower().strip()
+        txt = re.sub(r"[\s_]+", "_", txt)
+        return txt.strip("_")
+
+    @staticmethod
+    def _deducir_deposito_turno(hoja: str, archivo: str = "") -> str:
+        txt = f"{hoja or ''} {archivo or ''}".upper()
+        tokens = set(re.split(r"[^A-ZÁÉÍÓÚÑ0-9]+", txt))
+        if "LLV" in tokens or "LLAVALLOL" in tokens:
+            return "LLV"
+        if "TY" in tokens or "TEMPERLEY" in tokens or "TÉMPERLEY" in tokens:
+            return "TY"
+        if "KM5" in tokens or "K5" in tokens or "KM 5" in txt:
+            return "KM5"
+        if "LP" in tokens or "LA PLATA" in txt:
+            return "LP"
+        if "OA" in tokens or "TOLOSA" in tokens:
+            return "OA"
+        if "CÑ" in tokens or "CAÑUELAS" in tokens or "CANUELAS" in tokens:
+            return "CÑ"
+        if "AK" in tokens or "ALEJANDRO KORN" in txt or "KORN" in tokens:
+            return "AK"
+        if "RE" in tokens or "ESCALADA" in tokens:
+            return "RE"
+        if "PC" in tokens or "PLAZA CONSTITUCION" in txt or "PLAZA" in tokens:
+            return "PC"
+        if "LLV" in txt:
+            return "LLV"
+        if "TEMPERLEY" in txt:
+            return "TY"
+        if "KM5" in txt:
+            return "KM5"
+        if "LA PLATA" in txt:
+            return "LP"
+        if "TOLOSA" in txt:
+            return "OA"
+        return "PC"
+
+    def importar_itinerario_excel(
+        self,
+        file_path: str,
+        itinerario_nombre: Optional[str] = None,
+        regimen_default: Optional[str] = None,
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> Tuple[int, int]:
+        """Importa turnos desde Excel en formato completo (turno, dia H/S/D, nombre_itinerario...) o legacy Indice_45."""
         import openpyxl
-        import re
 
         wb = openpyxl.load_workbook(file_path, data_only=True)
-        ws = wb.active if "Datos" not in wb.sheetnames else wb["Datos"]
 
-        filas_por_turno: Dict[str, List[Dict[str, Any]]] = {}
+        header_aliases = {
+            "codigo_turno": {"turno", "codigo_turno", "codigo turno", "cod_turno", "cod turno"},
+            "dia": {"dia", "regimen", "tipo_dia", "tipo dia", "servicio", "dia_servicio"},
+            "toma": {"toma", "toma_servicio", "hora_toma"},
+            "deja": {"deja", "deje", "deje_servicio", "deja_servicio", "hora_deja", "hora_deje"},
+            "vuelta": {"vuelta", "nro_vuelta", "n_vuelta"},
+            "ref": {"ref", "referencia"},
+            "tren": {"tren", "nro_tren", "n_tren"},
+            "origen": {"origen", "est_origen", "estacion_origen"},
+            "sale": {"sale", "salida", "hora_salida", "h_salida"},
+            "destino": {"destino", "est_destino", "estacion_destino"},
+            "llega": {"llega", "llegada", "hora_llegada", "h_llegada"},
+            "observaciones": {"observaciones", "observacion", "obs", "observaciones_tramo", "obs_tramo"},
+            "nombre_itinerario": {"nombre_itinerario", "itinerario", "itinerario_vigente", "itin", "circ_iti"},
+            "nombre_hoja": {"nombre_hoja", "hoja", "deposito", "deposito_base"},
+            "nombre_archivo": {"nombre_archivo", "archivo"},
+        }
+        alias_to_field = {
+            alias: field
+            for field, aliases in header_aliases.items()
+            for alias in aliases
+        }
 
-        for row in range(2, ws.max_row + 1):
-            t_raw = ws.cell(row, 1).value
-            if not t_raw:
-                continue
-            codigo_turno = str(t_raw).strip().replace(",", ".")
+        def _detectar_mapeo_hoja(ws_cand) -> Optional[Tuple[int, Dict[str, int]]]:
+            for r in range(1, min(4, ws_cand.max_row) + 1):
+                cmap: Dict[str, int] = {}
+                for c in range(1, ws_cand.max_column + 1):
+                    h_norm = self._norm_header_col(ws_cand.cell(r, c).value)
+                    field = alias_to_field.get(h_norm)
+                    if field and field not in cmap:
+                        cmap[field] = c
+                if "codigo_turno" in cmap and len(
+                    {"toma", "deja", "vuelta", "tren", "origen", "destino"} & set(cmap.keys())
+                ) >= 2:
+                    return r, cmap
+            return None
 
-            toma = str(ws.cell(row, 2).value or "").strip()
-            deja = str(ws.cell(row, 3).value or "").strip()
-            nro_vuelta_raw = ws.cell(row, 4).value
-            try:
-                nro_vuelta = int(nro_vuelta_raw) if nro_vuelta_raw is not None else len(filas_por_turno.get(codigo_turno, [])) + 1
-            except (ValueError, TypeError):
-                nro_vuelta = len(filas_por_turno.get(codigo_turno, [])) + 1
+        hojas_a_procesar: List[Tuple[Any, int, Optional[Dict[str, int]]]] = []
+        if "Datos" in wb.sheetnames:
+            ws_datos = wb["Datos"]
+            det = _detectar_mapeo_hoja(ws_datos)
+            if det:
+                hojas_a_procesar.append((ws_datos, det[0] + 1, det[1]))
+            else:
+                hojas_a_procesar.append((ws_datos, 2, None))
+        else:
+            for ws_cand in wb.worksheets:
+                det = _detectar_mapeo_hoja(ws_cand)
+                if det:
+                    hojas_a_procesar.append((ws_cand, det[0] + 1, det[1]))
+            if not hojas_a_procesar:
+                hojas_a_procesar.append((wb.active, 2, None))
 
-            ref = str(ws.cell(row, 5).value or "").strip()
-            nro_tren = str(ws.cell(row, 6).value or "").strip()
-            if nro_tren in ("None", "-", ""):
-                nro_tren = None
+        legacy_pos = {
+            "codigo_turno": 1,
+            "toma": 2,
+            "deja": 3,
+            "vuelta": 4,
+            "ref": 5,
+            "tren": 6,
+            "origen": 7,
+            "sale": 8,
+            "destino": 9,
+            "llega": 10,
+            "observaciones": 11,
+            "nombre_itinerario": 12,
+            "nombre_hoja": 13,
+        }
 
-            origen = str(ws.cell(row, 7).value or "").strip()
-            h_salida = str(ws.cell(row, 8).value or "").strip()
-            destino = str(ws.cell(row, 9).value or "").strip()
-            h_llegada = str(ws.cell(row, 10).value or "").strip()
-            obs_tramo = str(ws.cell(row, 11).value or "").strip()
-            circ_iti = str(ws.cell(row, 12).value or "").strip()
-            hoja = str(ws.cell(row, 13).value or "").strip()
+        filas_por_turno: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
 
-            item = {
-                "codigo_turno": codigo_turno,
-                "toma": toma,
-                "deja": deja,
-                "nro_vuelta": nro_vuelta,
-                "ref": ref,
-                "nro_tren": nro_tren,
-                "origen": origen,
-                "h_salida": h_salida,
-                "destino": destino,
-                "h_llegada": h_llegada,
-                "obs_tramo": obs_tramo,
-                "circ_iti": circ_iti,
-                "hoja": hoja,
-            }
-            filas_por_turno.setdefault(codigo_turno, []).append(item)
+        for ws, start_row, col_map in hojas_a_procesar:
+            cmap_use = col_map if col_map is not None else legacy_pos
+            has_dia_col = col_map is not None and "dia" in col_map
+            sheet_reg_hint = ""
+            title_up = normalizar_texto_estacion(ws.title).upper()
+            if "SAB" in title_up:
+                sheet_reg_hint = "S"
+            elif "DOM" in title_up or "FERIAD" in title_up:
+                sheet_reg_hint = "D"
+            elif "HAB" in title_up or "LAV" in title_up or "L-V" in title_up:
+                sheet_reg_hint = "H"
+
+            for row in range(start_row, ws.max_row + 1):
+                c_turno = cmap_use.get("codigo_turno", 1)
+                t_raw = ws.cell(row, c_turno).value
+                codigo_turno = self._formatear_texto_celda(t_raw, reemplazar_coma=True)
+                if not codigo_turno:
+                    continue
+
+                def _get_val(field_name: str):
+                    col_i = cmap_use.get(field_name)
+                    return ws.cell(row, col_i).value if col_i else None
+
+                toma = self._formatear_hora_celda(_get_val("toma"))
+                deja = self._formatear_hora_celda(_get_val("deja"))
+
+                hoja = self._formatear_texto_celda(_get_val("nombre_hoja"))
+                archivo = self._formatear_texto_celda(_get_val("nombre_archivo"))
+                nom_itin = self._formatear_texto_celda(_get_val("nombre_itinerario"))
+                itinerario_val = (itinerario_nombre or nom_itin or "Dic25").strip() or "Dic25"
+
+                dia_raw = self._formatear_texto_celda(_get_val("dia"))
+                if dia_raw:
+                    regimen_val = self.normalizar_regimen_turno(dia_raw, default="H")
+                elif has_dia_col:
+                    # Si la hoja trae columna 'dia' pero la celda está vacía, deducir desde hoja/archivo o default H
+                    hint_txt = normalizar_texto_estacion(f"{hoja} {archivo}").upper()
+                    if "SAB" in hint_txt:
+                        regimen_val = "S"
+                    elif "DOM" in hint_txt or "FERIAD" in hint_txt:
+                        regimen_val = "D"
+                    elif sheet_reg_hint:
+                        regimen_val = sheet_reg_hint
+                    else:
+                        regimen_val = self.normalizar_regimen_turno(regimen_default or "H", default="H")
+                elif sheet_reg_hint:
+                    regimen_val = sheet_reg_hint
+                else:
+                    regimen_val = self.normalizar_regimen_turno(regimen_default or "TODOS", default="TODOS")
+
+                group_key = (codigo_turno, regimen_val, itinerario_val)
+
+                nro_vuelta_raw = _get_val("vuelta")
+                try:
+                    if isinstance(nro_vuelta_raw, float) and nro_vuelta_raw.is_integer():
+                        nro_vuelta = int(nro_vuelta_raw)
+                    else:
+                        nro_vuelta = int(str(nro_vuelta_raw).strip()) if nro_vuelta_raw not in (None, "") else len(filas_por_turno.get(group_key, [])) + 1
+                except (ValueError, TypeError):
+                    nro_vuelta = len(filas_por_turno.get(group_key, [])) + 1
+
+                ref = self._formatear_texto_celda(_get_val("ref"))
+                nro_tren_txt = self._formatear_texto_celda(_get_val("tren"))
+                nro_tren = None if nro_tren_txt in ("", "-") else nro_tren_txt
+
+                origen = self._formatear_texto_celda(_get_val("origen"))
+                h_salida = self._formatear_hora_celda(_get_val("sale"))
+                destino = self._formatear_texto_celda(_get_val("destino"))
+                h_llegada = self._formatear_hora_celda(_get_val("llega"))
+                obs_tramo = self._formatear_texto_celda(_get_val("observaciones"))
+
+                item = {
+                    "codigo_turno": codigo_turno,
+                    "regimen": regimen_val,
+                    "toma": toma,
+                    "deja": deja,
+                    "nro_vuelta": nro_vuelta,
+                    "ref": ref,
+                    "nro_tren": nro_tren,
+                    "origen": origen,
+                    "h_salida": h_salida,
+                    "destino": destino,
+                    "h_llegada": h_llegada,
+                    "obs_tramo": obs_tramo,
+                    "circ_iti": itinerario_val,
+                    "hoja": hoja,
+                    "archivo": archivo,
+                }
+                filas_por_turno.setdefault(group_key, []).append(item)
 
         turnos_guardados = 0
         vueltas_guardadas = 0
 
         with self.db.write_transaction() as conn:
-            for cod, vueltas in filas_por_turno.items():
+            for (cod, regimen_val, itinerario), vueltas in filas_por_turno.items():
                 v0 = vueltas[0]
                 toma = v0["toma"]
                 deja = v0["deja"]
-                itinerario = itinerario_nombre or v0["circ_iti"] or "Dic25"
+                deposito = self._deducir_deposito_turno(v0.get("hoja", ""), v0.get("archivo", ""))
 
-                # Deducir depósito
-                hoja_upper = v0["hoja"].upper()
-                deposito = "PC"
-                if "LLV" in hoja_upper:
-                    deposito = "LLV"
-                elif "TEMPERLEY" in hoja_upper or "TY" in hoja_upper:
-                    deposito = "TY"
-                elif "KM5" in hoja_upper:
-                    deposito = "KM5"
-                elif "LP" in hoja_upper or "LA PLATA" in hoja_upper:
-                    deposito = "LP"
-                elif "TOLOSA" in hoja_upper or "OA" in hoja_upper:
-                    deposito = "OA"
-
-                # Clasificar tipo de turno y parsear base y subíndice
                 m = re.match(r"^(\d+)\.(\d+)$", cod)
                 if m:
                     base = m.group(1)
@@ -2363,7 +2592,6 @@ class RecordsService:
                     subindice = None
                     tipo_turno = "UNIPERSONAL"
 
-                # Calcular duración aproximada si toma y deja están en formato HH:MM
                 duracion = ""
                 try:
                     if len(toma) == 5 and len(deja) == 5 and ":" in toma and ":" in deja:
@@ -2376,13 +2604,13 @@ class RecordsService:
                 except Exception:
                     duracion = ""
 
-                cur = conn.execute(
+                conn.execute(
                     """INSERT INTO turnos_itinerario
-                       (codigo_turno, turno_base, subindice, tipo_turno, deposito_base,
+                       (codigo_turno, regimen, turno_base, subindice, tipo_turno, deposito_base,
                         toma_servicio, deje_servicio, duracion_jornada, itinerario_vigente,
                         observaciones_turno, activo, sync_status, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', 1, 'pending', datetime('now', 'localtime'), datetime('now', 'localtime'))
-                       ON CONFLICT(codigo_turno) DO UPDATE SET
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 1, 'pending', datetime('now', 'localtime'), datetime('now', 'localtime'))
+                       ON CONFLICT(codigo_turno, regimen, itinerario_vigente) DO UPDATE SET
                         turno_base = excluded.turno_base,
                         subindice = excluded.subindice,
                         tipo_turno = excluded.tipo_turno,
@@ -2390,16 +2618,19 @@ class RecordsService:
                         toma_servicio = excluded.toma_servicio,
                         deje_servicio = excluded.deje_servicio,
                         duracion_jornada = excluded.duracion_jornada,
-                        itinerario_vigente = excluded.itinerario_vigente,
+                        activo = 1,
+                        sync_status = 'pending',
                         updated_at = datetime('now', 'localtime');""",
-                    (cod, base, subindice, tipo_turno, deposito, toma, deja, duracion, itinerario),
+                    (cod, regimen_val, base, subindice, tipo_turno, deposito, toma, deja, duracion, itinerario),
                 )
 
-                turno_row = conn.execute("SELECT id FROM turnos_itinerario WHERE codigo_turno = ?;", (cod,)).fetchone()
+                turno_row = conn.execute(
+                    "SELECT id FROM turnos_itinerario WHERE codigo_turno = ? AND regimen = ? AND itinerario_vigente = ?;",
+                    (cod, regimen_val, itinerario),
+                ).fetchone()
                 turno_id = turno_row[0]
                 turnos_guardados += 1
 
-                # Reemplazar vueltas
                 conn.execute("DELETE FROM turnos_vueltas WHERE turno_id = ?;", (turno_id,))
                 for v in vueltas:
                     conn.execute(
@@ -2421,6 +2652,21 @@ class RecordsService:
                     )
                     vueltas_guardadas += 1
 
+            self._audit(
+                conn,
+                user_id,
+                windows_user,
+                "importar",
+                "turnos_itinerario",
+                None,
+                None,
+                {
+                    "archivo": Path(file_path).name,
+                    "turnos": turnos_guardados,
+                    "vueltas": vueltas_guardadas,
+                },
+            )
+
         logger.info("Importación de itinerario completada: %d turnos, %d vueltas.", turnos_guardados, vueltas_guardadas)
         return turnos_guardados, vueltas_guardadas
 
@@ -2436,6 +2682,7 @@ class RecordsService:
                     v.id AS vuelta_id,
                     v.nro_tren,
                     ti.codigo_turno,
+                    COALESCE(NULLIF(TRIM(ti.regimen), ''), 'TODOS') AS regimen,
                     ti.turno_base,
                     ti.tipo_turno,
                     ti.deposito_base,
@@ -2453,30 +2700,94 @@ class RecordsService:
                    FROM turnos_vueltas v
                    JOIN turnos_itinerario ti ON v.turno_id = ti.id
                    WHERE v.nro_tren LIKE ? OR v.nro_tren = ?
-                   ORDER BY v.hora_salida ASC, ti.codigo_turno ASC;""",
+                   ORDER BY v.hora_salida ASC, ti.codigo_turno ASC, ti.regimen ASC;""",
                 (f"%{tren_clean}%", tren_clean),
             ).fetchall()
-            return [dict(r) for r in rows]
+            res = []
+            for r in rows:
+                d = dict(r)
+                d["regimen_label"] = self.formatear_regimen_turno(d.get("regimen"))
+                res.append(d)
+            return res
 
-    def listar_turnos_itinerario_map(self) -> Dict[str, Dict[str, Any]]:
+    def listar_turnos_itinerario_map(
+        self,
+        regimen: Optional[str] = None,
+        itinerario: Optional[str] = None,
+    ) -> Dict[str, Dict[str, Any]]:
         """Devuelve un mapa indexado por codigo_turno para resolución ultra-rápida."""
+        reg_target = self.normalizar_regimen_turno(regimen, default="TODOS") if regimen else None
+
         with self.db.read_connection() as conn:
-            rows = conn.execute(
-                """SELECT id, codigo_turno, turno_base, subindice, tipo_turno,
-                          deposito_base, toma_servicio, deje_servicio, duracion_jornada,
-                          itinerario_vigente, observaciones_turno
-                   FROM turnos_itinerario WHERE activo = 1;"""
-            ).fetchall()
-            return {r["codigo_turno"]: dict(r) for r in rows}
+            query = """SELECT id, codigo_turno, COALESCE(NULLIF(TRIM(regimen), ''), 'TODOS') AS regimen,
+                              turno_base, subindice, tipo_turno, deposito_base, toma_servicio,
+                              deje_servicio, duracion_jornada, itinerario_vigente, observaciones_turno
+                       FROM turnos_itinerario WHERE activo = 1"""
+            params: List[Any] = []
+            if itinerario and str(itinerario).strip() not in ("", "Todos", "Todas"):
+                query += " AND itinerario_vigente = ?"
+                params.append(str(itinerario).strip())
+            query += " ORDER BY id DESC;"
+            rows = [dict(r) for r in conn.execute(query, params).fetchall()]
+
+        def _score_reg(r_val: str) -> int:
+            rv = str(r_val or "TODOS").strip().upper()
+            if reg_target in ("H", "S", "D"):
+                if rv == reg_target:
+                    return 0
+                if rv in ("", "TODOS", "ALL"):
+                    return 1
+                if rv == "H":
+                    return 2
+                return 3
+            if rv in ("", "TODOS", "ALL"):
+                return 0
+            if rv == "H":
+                return 1
+            if rv == "S":
+                return 2
+            return 3
+
+        rows.sort(key=lambda r: _score_reg(r.get("regimen", "TODOS")))
+        mapa: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            cod = r["codigo_turno"]
+            if cod not in mapa:
+                mapa[cod] = r
+        return mapa
 
     def listar_itinerarios_disponibles(self) -> List[str]:
-        """Devuelve la lista de códigos/nombres de itinerarios únicos cargados."""
+        """Devuelve la lista de códigos/nombres de itinerarios activos únicos cargados."""
         with self.db.read_connection() as conn:
             rows = conn.execute(
                 """SELECT DISTINCT itinerario_vigente FROM turnos_itinerario
                    WHERE activo = 1 ORDER BY itinerario_vigente ASC;"""
             ).fetchall()
             return [r[0] for r in rows if r[0]]
+
+    def listar_itinerarios_turnos(self, incluir_inactivos: bool = True) -> List[str]:
+        """Devuelve los itinerarios únicos cargados en turnos_itinerario (opcionalmente incluyendo inactivos)."""
+        with self.db.read_connection() as conn:
+            sql = "SELECT DISTINCT TRIM(itinerario_vigente) FROM turnos_itinerario WHERE TRIM(itinerario_vigente) != ''"
+            if not incluir_inactivos:
+                sql += " AND activo = 1"
+            sql += " ORDER BY 1 ASC;"
+            return [r[0] for r in conn.execute(sql).fetchall() if r[0]]
+
+    def listar_depositos_turnos(self) -> List[str]:
+        """Devuelve los depósitos activos combinados con los presentes en turnos_itinerario."""
+        with self.db.read_connection() as conn:
+            dots = {
+                str(r[0]).strip()
+                for r in conn.execute("SELECT nombre FROM dotaciones WHERE activo = 1").fetchall()
+                if r and str(r[0] or "").strip()
+            }
+            deps = {
+                str(r[0]).strip()
+                for r in conn.execute("SELECT DISTINCT deposito_base FROM turnos_itinerario WHERE TRIM(deposito_base) != ''").fetchall()
+                if r and str(r[0] or "").strip()
+            }
+        return sorted(dots | deps)
 
     def obtener_vueltas_de_turno(self, turno_id: int) -> List[Dict[str, Any]]:
         """Devuelve la totalidad de vueltas de un turno ordenadas cronológicamente."""
@@ -2495,28 +2806,76 @@ class RecordsService:
         self,
         codigo_turno: str,
         itinerario: Optional[str] = None,
+        regimen: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Busca un turno por su código (ej: '401.1' o '401') y opcionalmente por itinerario."""
+        """Busca un turno por su código (ej: '401.1' o '401') y opcionalmente por itinerario y día/régimen."""
         cod = str(codigo_turno or "").strip()
         if not cod:
             return None
+        reg_norm = self.normalizar_regimen_turno(regimen, default="TODOS") if regimen else None
+
         with self.db.read_connection() as conn:
             query = """
-                SELECT id, codigo_turno, turno_base, subindice, tipo_turno, deposito_base,
+                SELECT id, codigo_turno, COALESCE(NULLIF(TRIM(regimen), ''), 'TODOS') AS regimen,
+                       turno_base, subindice, tipo_turno, deposito_base,
                        toma_servicio, deje_servicio, duracion_jornada, tiempo_toma, tiempo_deje,
                        itinerario_vigente, observaciones_turno, activo
                 FROM turnos_itinerario
                 WHERE activo = 1 AND (codigo_turno = ? OR turno_base = ?)
             """
-            params = [cod, cod]
-            if itinerario and str(itinerario).strip() not in ("Todos", ""):
+            params: List[Any] = [cod, cod]
+            if itinerario and str(itinerario).strip() not in ("Todos", "Todas", ""):
                 query += " AND itinerario_vigente = ?"
                 params.append(str(itinerario).strip())
-            query += " ORDER BY itinerario_vigente DESC, id DESC LIMIT 1;"
+
+            if reg_norm in ("H", "S", "D"):
+                query += """
+                    ORDER BY
+                        CASE UPPER(TRIM(COALESCE(regimen, 'TODOS')))
+                            WHEN ? THEN 0
+                            WHEN 'TODOS' THEN 1
+                            WHEN '' THEN 1
+                            WHEN 'H' THEN 2
+                            ELSE 3
+                        END ASC,
+                        itinerario_vigente DESC,
+                        id DESC
+                    LIMIT 1;
+                """
+                params.append(reg_norm)
+            elif reg_norm == "TODOS":
+                query += """
+                    ORDER BY
+                        CASE UPPER(TRIM(COALESCE(regimen, 'TODOS')))
+                            WHEN 'TODOS' THEN 0
+                            WHEN '' THEN 0
+                            WHEN 'H' THEN 1
+                            WHEN 'S' THEN 2
+                            ELSE 3
+                        END ASC,
+                        itinerario_vigente DESC,
+                        id DESC
+                    LIMIT 1;
+                """
+            else:
+                query += """
+                    ORDER BY
+                        CASE UPPER(TRIM(COALESCE(regimen, 'TODOS')))
+                            WHEN 'H' THEN 0
+                            WHEN 'TODOS' THEN 1
+                            WHEN '' THEN 1
+                            WHEN 'S' THEN 2
+                            ELSE 3
+                        END ASC,
+                        itinerario_vigente DESC,
+                        id DESC
+                    LIMIT 1;
+                """
             row = conn.execute(query, params).fetchone()
             if not row:
                 return None
             res = dict(row)
+            res["regimen_label"] = self.formatear_regimen_turno(res.get("regimen"))
             res["vueltas"] = self.obtener_vueltas_de_turno(res["id"])
             return res
 
@@ -2527,7 +2886,7 @@ class RecordsService:
         tipo_dia: str = "HABIL",
         itinerarios: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
-        """Búsqueda dual (por tren o por turno) con resolución de conductor titular y cobertura de novedades."""
+        """Búsqueda dual (por tren o por turno) filtrando por día H/S/D y resolviendo titular/cobertura."""
         crit_clean = str(criterio or "").strip()
         if not crit_clean:
             return []
@@ -2536,11 +2895,18 @@ class RecordsService:
         if not f_obj:
             f_obj = date.today()
         dia_sem_nom = DIAS_SEMANA[f_obj.weekday()]
+        reg_target = self.normalizar_regimen_turno(tipo_dia, default="TODOS")
 
         with self.db.read_connection() as conn:
-            # 1. Identificar turnos candidatos según criterio dual
+            # 1. Identificar turnos candidatos según criterio dual + día/itinerario
             where_clauses = ["ti.activo = 1"]
             params: List[Any] = []
+
+            if reg_target in ("H", "S", "D"):
+                where_clauses.append(
+                    "(UPPER(TRIM(COALESCE(ti.regimen, 'TODOS'))) = ? OR UPPER(TRIM(COALESCE(ti.regimen, 'TODOS'))) IN ('', 'TODOS', 'ALL'))"
+                )
+                params.append(reg_target)
 
             if itinerarios:
                 placeholders = ",".join("?" for _ in itinerarios)
@@ -2548,7 +2914,6 @@ class RecordsService:
                 params.extend(itinerarios)
 
             if crit_clean:
-                # Criterio dual: coincide con turno_base, codigo_turno o nro_tren en vueltas
                 crit_normalizado = crit_clean.replace(",", ".")
                 where_clauses.append("""(
                     ti.codigo_turno LIKE ? OR
@@ -2562,12 +2927,13 @@ class RecordsService:
 
             query = f"""
                 SELECT DISTINCT
-                    ti.id, ti.codigo_turno, ti.turno_base, ti.subindice, ti.tipo_turno,
+                    ti.id, ti.codigo_turno, COALESCE(NULLIF(TRIM(ti.regimen), ''), 'TODOS') AS regimen,
+                    ti.turno_base, ti.subindice, ti.tipo_turno,
                     ti.deposito_base, ti.toma_servicio, ti.deje_servicio, ti.duracion_jornada,
                     ti.itinerario_vigente, ti.observaciones_turno
                 FROM turnos_itinerario ti
                 WHERE {" AND ".join(where_clauses)}
-                ORDER BY ti.turno_base ASC, ti.subindice ASC, ti.codigo_turno ASC
+                ORDER BY ti.turno_base ASC, ti.subindice ASC, ti.codigo_turno ASC, ti.itinerario_vigente ASC, ti.regimen ASC
                 LIMIT 300;
             """
             turnos_candidatos = [dict(r) for r in conn.execute(query, params).fetchall()]
@@ -2609,7 +2975,6 @@ class RecordsService:
                     if d_fin and f_obj > d_fin:
                         continue
 
-                # La novedad está activa para el titular en la fecha
                 reemplazo_aplica = False
                 leg_r = n.get("legajo_reemplazo")
                 if leg_r:
@@ -2635,7 +3000,6 @@ class RecordsService:
                     nov_entry["legajo_reemplazo"] = None
                     nov_entry["apellidos_nombres_reemplazo"] = None
 
-                # Si ya había una novedad sin reemplazo y esta tiene reemplazo, priorizar
                 if leg_tit not in nov_map_por_legajo or reemplazo_aplica:
                     nov_map_por_legajo[leg_tit] = nov_entry
 
@@ -2713,9 +3077,7 @@ class RecordsService:
 
                 titular_encontrado: Optional[Dict[str, Any]] = None
 
-                # Buscar en la dotación de conductores
                 if tipo == "DIAGRAMA_6D" and sub is not None:
-                    # Para diagrama de 6 días, cruzar con rotación de francos
                     for c in conductores:
                         if c["turnos"] == base:
                             sub_calc, es_f = resolver_subindice_diagrama_6d(dia_sem_nom, c.get("franco") or "")
@@ -2795,6 +3157,7 @@ class RecordsService:
                         estado_alerta = "VACANTE"
 
                 item_res = dict(t)
+                item_res["regimen_label"] = self.formatear_regimen_turno(item_res.get("regimen"))
                 item_res["titular"] = titular_str
                 item_res["cobertura"] = reemplazo_str
                 item_res["estado_alerta"] = estado_alerta
@@ -2815,16 +3178,17 @@ class RecordsService:
                 SELECT
                     tv.id, tv.turno_id, tv.nro_vuelta, tv.ref, tv.nro_tren,
                     tv.origen, tv.hora_salida, tv.destino, tv.hora_llegada, tv.observaciones_tramo,
-                    ti.codigo_turno, ti.turno_base
+                    ti.codigo_turno, ti.turno_base,
+                    COALESCE(NULLIF(TRIM(ti.regimen), ''), 'TODOS') AS regimen,
+                    ti.itinerario_vigente
                 FROM turnos_vueltas tv
                 JOIN turnos_itinerario ti ON ti.id = tv.turno_id
                 WHERE tv.turno_id IN ({placeholders})
-                ORDER BY ti.turno_base ASC, ti.subindice ASC, ti.codigo_turno ASC, tv.nro_vuelta ASC;
+                ORDER BY ti.turno_base ASC, ti.subindice ASC, ti.codigo_turno ASC, ti.itinerario_vigente ASC, ti.regimen ASC, tv.nro_vuelta ASC;
                 """,
                 turno_ids,
             ).fetchall()
             return [dict(r) for r in rows]
-
 
     def listar_codigos_turnos_base(self) -> List[str]:
         """Devuelve los turnos base únicos (ej: 401, 410, PROG.1CK5) para autocompletar."""
@@ -2839,38 +3203,102 @@ class RecordsService:
     # CRUD de Turnos de Itinerario y Vueltas
     # ---------------------------------------------------------
 
+    def _build_turnos_admin_where(
+        self,
+        criterio: str = "",
+        deposito: Optional[str] = None,
+        itinerario: Optional[str] = None,
+        regimen: Optional[str] = None,
+        incluir_inactivos: bool = True,
+    ) -> Tuple[str, List[Any]]:
+        clauses = ["1=1"]
+        params: List[Any] = []
+        if not incluir_inactivos:
+            clauses.append("ti.activo = 1")
+        if deposito and str(deposito).strip() not in ("Todas", "Todos", ""):
+            clauses.append("ti.deposito_base = ?")
+            params.append(str(deposito).strip())
+        if itinerario and str(itinerario).strip() not in ("Todas", "Todos", ""):
+            clauses.append("ti.itinerario_vigente = ?")
+            params.append(str(itinerario).strip())
+        if regimen and str(regimen).strip() not in ("Todas", "Todos", ""):
+            reg_raw = str(regimen).strip()
+            reg_key = reg_raw.split("-")[0].strip().upper()
+            reg_norm = "TODOS" if reg_key == "TODOS" else self.normalizar_regimen_turno(reg_key, default="TODOS")
+            if reg_norm == "TODOS":
+                clauses.append("UPPER(TRIM(COALESCE(ti.regimen, ''))) IN ('', 'TODOS')")
+            else:
+                clauses.append("UPPER(TRIM(COALESCE(ti.regimen, ''))) = ?")
+                params.append(reg_norm)
+        if criterio and criterio.strip():
+            c_clean = criterio.strip()
+            c_norm = c_clean.replace(",", ".")
+            c_like = f"%{c_norm}%"
+            clauses.append("(ti.codigo_turno LIKE ? OR ti.turno_base LIKE ? OR ti.observaciones_turno LIKE ?)")
+            params.extend([c_like, f"%{c_clean}%", f"%{c_clean}%"])
+        return " AND ".join(clauses), params
+
     def listar_turnos_admin(
         self,
         criterio: str = "",
         deposito: Optional[str] = None,
+        itinerario: Optional[str] = None,
+        regimen: Optional[str] = None,
         incluir_inactivos: bool = True,
-        limite: int = 1000,
+        limite: int = 10000,
     ) -> List[Dict[str, Any]]:
-        """Lista los turnos de itinerario con conteo de vueltas asociadas para administración."""
-        query = """
-            SELECT ti.id, ti.codigo_turno, ti.turno_base, ti.subindice, ti.tipo_turno,
+        """Lista los turnos de itinerario con conteo de vueltas y filtros por depósito, itinerario y día H/S/D."""
+        where_sql, params = self._build_turnos_admin_where(
+            criterio=criterio,
+            deposito=deposito,
+            itinerario=itinerario,
+            regimen=regimen,
+            incluir_inactivos=incluir_inactivos,
+        )
+        query = f"""
+            SELECT ti.id, ti.codigo_turno, COALESCE(NULLIF(TRIM(ti.regimen), ''), 'TODOS') AS regimen,
+                   ti.turno_base, ti.subindice, ti.tipo_turno,
                    ti.deposito_base, ti.toma_servicio, ti.deje_servicio, ti.duracion_jornada,
                    ti.itinerario_vigente, ti.observaciones_turno, ti.activo,
                    (SELECT COUNT(*) FROM turnos_vueltas tv WHERE tv.turno_id = ti.id) AS cant_vueltas
             FROM turnos_itinerario ti
-            WHERE 1=1
+            WHERE {where_sql}
+            ORDER BY ti.itinerario_vigente ASC, ti.regimen ASC, ti.turno_base ASC, ti.subindice ASC, ti.codigo_turno ASC
+            LIMIT ?
         """
-        params: List[Any] = []
-        if not incluir_inactivos:
-            query += " AND ti.activo = 1"
-        if deposito and deposito not in ("Todas", "Todos", ""):
-            query += " AND ti.deposito_base = ?"
-            params.append(deposito)
-        if criterio:
-            c_like = f"%{criterio.strip()}%"
-            query += " AND (ti.codigo_turno LIKE ? OR ti.turno_base LIKE ? OR ti.observaciones_turno LIKE ?)"
-            params.extend([c_like, c_like, c_like])
-        query += " ORDER BY ti.turno_base ASC, ti.subindice ASC, ti.codigo_turno ASC LIMIT ?"
-        params.append(limite)
+        params.append(int(limite))
 
         with self.db.read_connection() as conn:
             rows = conn.execute(query, params).fetchall()
-            return [dict(r) for r in rows]
+            res = []
+            for r in rows:
+                d = dict(r)
+                d["regimen_label"] = self.formatear_regimen_turno(d.get("regimen"))
+                res.append(d)
+            return res
+
+    def contar_turnos_por_filtros(
+        self,
+        criterio: str = "",
+        deposito: Optional[str] = None,
+        itinerario: Optional[str] = None,
+        regimen: Optional[str] = None,
+        incluir_inactivos: bool = True,
+    ) -> int:
+        """Devuelve la cantidad exacta de turnos que cumplen los filtros indicados."""
+        where_sql, params = self._build_turnos_admin_where(
+            criterio=criterio,
+            deposito=deposito,
+            itinerario=itinerario,
+            regimen=regimen,
+            incluir_inactivos=incluir_inactivos,
+        )
+        with self.db.read_connection() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM turnos_itinerario ti WHERE {where_sql}",
+                params,
+            ).fetchone()
+            return int(row[0]) if row else 0
 
     def obtener_turno_completo(self, turno_id: int) -> Optional[Dict[str, Any]]:
         """Obtiene la ficha completa de un turno de itinerario y todas sus vueltas."""
@@ -2879,6 +3307,8 @@ class RecordsService:
             if not t:
                 return None
             res = dict(t)
+            res["regimen"] = res.get("regimen") or "TODOS"
+            res["regimen_label"] = self.formatear_regimen_turno(res["regimen"])
             vueltas = conn.execute(
                 "SELECT * FROM turnos_vueltas WHERE turno_id = ? ORDER BY nro_vuelta ASC",
                 (turno_id,),
@@ -2904,20 +3334,26 @@ class RecordsService:
         deposito = str(payload.get("deposito_base") or "PC").strip()
         tipo = str(payload.get("tipo_turno") or "DIAGRAMA_6D").strip()
         itinerario = str(payload.get("itinerario_vigente") or "45").strip()
+        regimen = self.normalizar_regimen_turno(payload.get("regimen") or payload.get("dia") or "TODOS", default="TODOS")
 
         with self.db.write_transaction() as conn:
-            exist = conn.execute("SELECT id FROM turnos_itinerario WHERE codigo_turno = ?", (codigo,)).fetchone()
+            exist = conn.execute(
+                "SELECT id FROM turnos_itinerario WHERE codigo_turno = ? AND regimen = ? AND itinerario_vigente = ?",
+                (codigo, regimen, itinerario),
+            ).fetchone()
             if exist:
-                raise ValueError(f"Ya existe un turno con el código '{codigo}'.")
+                raise ValueError(
+                    f"Ya existe el turno '{codigo}' para el día '{self.formatear_regimen_turno(regimen)}' e itinerario '{itinerario}'."
+                )
 
             cur = conn.execute(
                 """INSERT INTO turnos_itinerario (
-                    codigo_turno, turno_base, subindice, tipo_turno, deposito_base,
+                    codigo_turno, regimen, turno_base, subindice, tipo_turno, deposito_base,
                     toma_servicio, deje_servicio, duracion_jornada, tiempo_toma, tiempo_deje,
                     itinerario_vigente, observaciones_turno, activo, sync_status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now', 'localtime'), datetime('now', 'localtime'))""",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now', 'localtime'), datetime('now', 'localtime'))""",
                 (
-                    codigo, base, payload.get("subindice"), tipo, deposito,
+                    codigo, regimen, base, payload.get("subindice"), tipo, deposito,
                     payload.get("toma_servicio"), payload.get("deje_servicio"),
                     payload.get("duracion_jornada"), payload.get("tiempo_toma"), payload.get("tiempo_deje"),
                     itinerario, payload.get("observaciones_turno"), int(payload.get("activo", 1)),
@@ -2940,6 +3376,7 @@ class RecordsService:
                     )
 
             audit_payload = dict(payload)
+            audit_payload["regimen"] = regimen
             audit_payload["vueltas_count"] = len(vueltas or [])
             self._audit(conn, user_id, windows_user, "crear", "turno_itinerario", turno_id, None, audit_payload)
             self._enqueue_sync(conn, "turnos_itinerario", turno_id, "INSERT", audit_payload)
@@ -2970,22 +3407,28 @@ class RecordsService:
             if not before:
                 raise ValueError("El turno no existe.")
 
+            reg_fallback = dict(before).get("regimen") or "TODOS"
+            reg_raw = payload.get("regimen") or payload.get("dia")
+            regimen = self.normalizar_regimen_turno(reg_raw, default=reg_fallback) if reg_raw is not None else reg_fallback
+
             dup = conn.execute(
-                "SELECT id FROM turnos_itinerario WHERE codigo_turno = ? AND id != ?",
-                (codigo, turno_id),
+                "SELECT id FROM turnos_itinerario WHERE codigo_turno = ? AND regimen = ? AND itinerario_vigente = ? AND id != ?",
+                (codigo, regimen, itinerario, turno_id),
             ).fetchone()
             if dup:
-                raise ValueError(f"Ya existe otro turno con el código '{codigo}'.")
+                raise ValueError(
+                    f"Ya existe otro turno '{codigo}' para '{self.formatear_regimen_turno(regimen)}' e itinerario '{itinerario}'."
+                )
 
             conn.execute(
                 """UPDATE turnos_itinerario SET
-                    codigo_turno = ?, turno_base = ?, subindice = ?, tipo_turno = ?, deposito_base = ?,
+                    codigo_turno = ?, regimen = ?, turno_base = ?, subindice = ?, tipo_turno = ?, deposito_base = ?,
                     toma_servicio = ?, deje_servicio = ?, duracion_jornada = ?, tiempo_toma = ?, tiempo_deje = ?,
                     itinerario_vigente = ?, observaciones_turno = ?, activo = ?,
                     sync_status = 'pending', updated_at = datetime('now', 'localtime')
                 WHERE id = ?""",
                 (
-                    codigo, base, payload.get("subindice"), tipo, deposito,
+                    codigo, regimen, base, payload.get("subindice"), tipo, deposito,
                     payload.get("toma_servicio"), payload.get("deje_servicio"),
                     payload.get("duracion_jornada"), payload.get("tiempo_toma"), payload.get("tiempo_deje"),
                     itinerario, payload.get("observaciones_turno"), int(payload.get("activo", 1)),
@@ -3009,6 +3452,7 @@ class RecordsService:
                     )
 
             after = dict(payload)
+            after["regimen"] = regimen
             self._audit(conn, user_id, windows_user, "modificar", "turno_itinerario", turno_id, dict(before), after)
             self._enqueue_sync(conn, "turnos_itinerario", turno_id, "UPDATE", after)
 
@@ -3033,6 +3477,45 @@ class RecordsService:
             self._audit(conn, user_id, windows_user, "cambiar_estado", "turno_itinerario", turno_id, dict(before), after)
             self._enqueue_sync(conn, "turnos_itinerario", turno_id, "UPDATE", after)
 
+    def cambiar_estado_turnos_lote(
+        self,
+        turno_ids: Sequence[int],
+        activo: Optional[int] = None,
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> int:
+        """Activa, desactiva o invierte el estado de múltiples turnos de itinerario en lote."""
+        ids_clean = list(dict.fromkeys(int(tid) for tid in turno_ids if tid is not None))
+        if not ids_clean:
+            return 0
+        actualizados = 0
+        with self.db.write_transaction() as conn:
+            for i in range(0, len(ids_clean), 400):
+                chunk = ids_clean[i : i + 400]
+                ph = ",".join("?" for _ in chunk)
+                rows = [dict(r) for r in conn.execute(f"SELECT * FROM turnos_itinerario WHERE id IN ({ph})", chunk).fetchall()]
+                for r in rows:
+                    nuevo_act = (0 if r.get("activo") else 1) if activo is None else int(activo)
+                    conn.execute(
+                        "UPDATE turnos_itinerario SET activo = ?, sync_status = 'pending', updated_at = datetime('now', 'localtime') WHERE id = ?",
+                        (nuevo_act, r["id"]),
+                    )
+                    after = dict(r)
+                    after["activo"] = nuevo_act
+                    self._enqueue_sync(conn, "turnos_itinerario", r["id"], "UPDATE", after)
+                    actualizados += 1
+            self._audit(
+                conn,
+                user_id,
+                windows_user,
+                "cambiar_estado_lote",
+                "turno_itinerario",
+                None,
+                None,
+                {"ids": ids_clean[:50], "total": actualizados, "activo": activo},
+            )
+        return actualizados
+
     def eliminar_turno_definitivo(
         self,
         turno_id: int,
@@ -3048,6 +3531,111 @@ class RecordsService:
             conn.execute("DELETE FROM turnos_itinerario WHERE id = ?", (turno_id,))
             self._audit(conn, user_id, windows_user, "eliminar", "turno_itinerario", turno_id, dict(before), None)
             self._enqueue_sync(conn, "turnos_itinerario", turno_id, "DELETE", {"id": turno_id})
+
+    def eliminar_turnos_lote(
+        self,
+        turno_ids: Sequence[int],
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> int:
+        """Elimina permanentemente en lote una selección de turnos de itinerario y sus vueltas."""
+        ids_clean = list(dict.fromkeys(int(tid) for tid in turno_ids if tid is not None))
+        if not ids_clean:
+            return 0
+
+        eliminados = 0
+        ejemplos: List[str] = []
+        with self.db.write_transaction() as conn:
+            for i in range(0, len(ids_clean), 400):
+                chunk = ids_clean[i : i + 400]
+                ph = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT id, codigo_turno, regimen, itinerario_vigente FROM turnos_itinerario WHERE id IN ({ph})",
+                    chunk,
+                ).fetchall()
+                if not rows:
+                    continue
+                found_ids = [int(r[0]) for r in rows]
+                for r in rows:
+                    if len(ejemplos) < 25:
+                        ejemplos.append(f"{r[1]} ({r[2]}/{r[3]})")
+                ph_found = ",".join("?" for _ in found_ids)
+                conn.execute(f"DELETE FROM turnos_vueltas WHERE turno_id IN ({ph_found})", found_ids)
+                conn.execute(f"DELETE FROM turnos_itinerario WHERE id IN ({ph_found})", found_ids)
+                for tid in found_ids:
+                    self._enqueue_sync(conn, "turnos_itinerario", tid, "DELETE", {"id": tid})
+                eliminados += len(found_ids)
+
+            if eliminados > 0:
+                self._audit(
+                    conn,
+                    user_id,
+                    windows_user,
+                    "eliminar_lote",
+                    "turno_itinerario",
+                    None,
+                    {"eliminados": eliminados, "ejemplos": ejemplos},
+                    None,
+                )
+        return eliminados
+
+    def eliminar_turnos_por_filtros(
+        self,
+        criterio: str = "",
+        deposito: Optional[str] = None,
+        itinerario: Optional[str] = None,
+        regimen: Optional[str] = None,
+        incluir_inactivos: bool = True,
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> int:
+        """Elimina permanentemente todos los turnos (y sus vueltas) que coinciden con los filtros activos."""
+        where_sql, params = self._build_turnos_admin_where(
+            criterio=criterio,
+            deposito=deposito,
+            itinerario=itinerario,
+            regimen=regimen,
+            incluir_inactivos=incluir_inactivos,
+        )
+        with self.db.write_transaction() as conn:
+            rows = conn.execute(
+                f"SELECT ti.id, ti.codigo_turno FROM turnos_itinerario ti WHERE {where_sql}",
+                params,
+            ).fetchall()
+            if not rows:
+                return 0
+
+            ids = [int(r[0]) for r in rows]
+            ejemplos = [str(r[1]) for r in rows[:25]]
+            for i in range(0, len(ids), 400):
+                chunk = ids[i : i + 400]
+                ph = ",".join("?" for _ in chunk)
+                conn.execute(f"DELETE FROM turnos_vueltas WHERE turno_id IN ({ph})", chunk)
+                conn.execute(f"DELETE FROM turnos_itinerario WHERE id IN ({ph})", chunk)
+                for tid in chunk:
+                    self._enqueue_sync(conn, "turnos_itinerario", tid, "DELETE", {"id": tid})
+
+            self._audit(
+                conn,
+                user_id,
+                windows_user,
+                "eliminar_por_filtros",
+                "turno_itinerario",
+                None,
+                {
+                    "filtros": {
+                        "criterio": criterio,
+                        "deposito": deposito,
+                        "itinerario": itinerario,
+                        "regimen": regimen,
+                        "incluir_inactivos": incluir_inactivos,
+                    },
+                    "eliminados": len(ids),
+                    "ejemplos": ejemplos,
+                },
+                None,
+            )
+            return len(ids)
 
     # ---------------------------------------------------------
     # Catálogo de Estaciones, Siglas y Equivalencias

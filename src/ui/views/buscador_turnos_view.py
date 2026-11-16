@@ -60,10 +60,20 @@ class TurnoSeparatorDelegate(QStyledItemDelegate):
         # Comprobar si la fila siguiente pertenece a un turno distinto
         es_cambio_turno = False
         if curr_row < total_rows - 1:
-            val_curr = model.index(curr_row, 0).data(Qt.DisplayRole)
-            val_next = model.index(curr_row + 1, 0).data(Qt.DisplayRole)
-            if val_curr != val_next:
-                es_cambio_turno = True
+            if hasattr(model, "get_row"):
+                row_curr = model.get_row(curr_row) or {}
+                row_next = model.get_row(curr_row + 1) or {}
+                tid_curr = row_curr.get("turno_id")
+                tid_next = row_next.get("turno_id")
+                if tid_curr is not None and tid_next is not None:
+                    es_cambio_turno = tid_curr != tid_next
+                else:
+                    es_cambio_turno = model.index(curr_row, 0).data(Qt.DisplayRole) != model.index(curr_row + 1, 0).data(Qt.DisplayRole)
+            else:
+                val_curr = model.index(curr_row, 0).data(Qt.DisplayRole)
+                val_next = model.index(curr_row + 1, 0).data(Qt.DisplayRole)
+                if val_curr != val_next:
+                    es_cambio_turno = True
 
         if es_cambio_turno:
             painter.save()
@@ -264,11 +274,11 @@ class BuscadorTurnosView(QWidget):
         lay_turnos = QVBoxLayout(grp_turnos)
 
         headers_turnos = [
-            "CÓDIGO TURNO", "BASE", "TIPO", "DEPÓSITO", "TOMA", "DEJE", "DURACIÓN",
+            "CÓDIGO TURNO", "DÍA", "BASE", "TIPO", "DEPÓSITO", "TOMA", "DEJE", "DURACIÓN",
             "TITULAR / REEMPLAZO ASIGNADO", "ESTADO / COBERTURA", "ITINERARIO",
         ]
         keys_turnos = [
-            "codigo_turno", "turno_base", "tipo_turno", "deposito_base", "toma_servicio",
+            "codigo_turno", "regimen_label", "turno_base", "tipo_turno", "deposito_base", "toma_servicio",
             "deje_servicio", "duracion_jornada", "titular", "cobertura", "itinerario_vigente",
         ]
 
@@ -296,12 +306,14 @@ class BuscadorTurnosView(QWidget):
         self.table_turnos.setColumnWidth(0, 95)
         self.table_turnos.setColumnWidth(1, 85)
         self.table_turnos.setColumnWidth(2, 75)
-        self.table_turnos.setColumnWidth(3, 75)
-        self.table_turnos.setColumnWidth(4, 80)
-        self.table_turnos.setColumnWidth(5, 110)
-        self.table_turnos.setColumnWidth(6, 140)
-        self.table_turnos.setColumnWidth(7, 210)
-        self.table_turnos.horizontalHeader().setSectionResizeMode(8, QHeaderView.Stretch)
+        self.table_turnos.setColumnWidth(3, 85)
+        self.table_turnos.setColumnWidth(4, 75)
+        self.table_turnos.setColumnWidth(5, 70)
+        self.table_turnos.setColumnWidth(6, 70)
+        self.table_turnos.setColumnWidth(7, 80)
+        self.table_turnos.setColumnWidth(8, 210)
+        self.table_turnos.horizontalHeader().setSectionResizeMode(9, QHeaderView.Stretch)
+        self.table_turnos.setColumnWidth(10, 95)
         self.table_turnos.selectionModel().selectionChanged.connect(self._on_turno_seleccionado)
         lay_turnos.addWidget(self.table_turnos)
         splitter.addWidget(grp_turnos)
@@ -479,9 +491,15 @@ class BuscadorTurnosView(QWidget):
         if not turno:
             return
 
+        turno_id = turno.get("id")
         cod_t = turno.get("codigo_turno")
         for v_idx, v in enumerate(self._vueltas_todas):
-            if v.get("codigo_turno") == cod_t:
+            coincide = (
+                v.get("turno_id") == turno_id
+                if (turno_id is not None and v.get("turno_id") is not None)
+                else v.get("codigo_turno") == cod_t
+            )
+            if coincide:
                 model_idx = self.model_vueltas.index(v_idx, 0)
                 self.table_vueltas.scrollTo(model_idx)
                 self.table_vueltas.selectRow(v_idx)
@@ -566,7 +584,7 @@ class BuscadorTurnosView(QWidget):
             ws1.title = "Turnos Encontrados"
 
             headers1 = [
-                "Código Turno", "Turno Base", "Tipo", "Depósito", "Toma", "Deje", "Duración",
+                "Código Turno", "Día", "Turno Base", "Tipo", "Depósito", "Toma", "Deje", "Duración",
                 "Titular / Reemplazo", "Estado Cobertura", "Itinerario Vigente"
             ]
             ws1.append(headers1)
@@ -574,6 +592,7 @@ class BuscadorTurnosView(QWidget):
             for t in self._turnos_resultados:
                 ws1.append([
                     t.get("codigo_turno"),
+                    t.get("regimen_label") or t.get("regimen") or "TODOS",
                     t.get("turno_base"),
                     t.get("tipo_turno"),
                     t.get("deposito_base"),
@@ -589,13 +608,14 @@ class BuscadorTurnosView(QWidget):
             if self._vueltas_todas:
                 ws2 = wb.create_sheet(title="Todas las Vueltas")
                 headers2 = [
-                    "Turno", "Vuelta N°", "Referencia", "Tren", "Origen",
+                    "Turno", "Día", "Vuelta N°", "Referencia", "Tren", "Origen",
                     "Salida", "Destino", "Llegada", "Observaciones",
                 ]
                 ws2.append(headers2)
                 for v in self._vueltas_todas:
                     ws2.append([
                         v.get("codigo_turno"),
+                        self.records_service.formatear_regimen_turno(v.get("regimen")) if v.get("regimen") else "TODOS",
                         v.get("nro_vuelta"),
                         v.get("ref"),
                         v.get("nro_tren"),

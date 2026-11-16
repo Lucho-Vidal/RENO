@@ -33,12 +33,14 @@ class DetalleTurnoDialog(BaseDialog):
         records_service: RecordsService,
         codigo_turno: str,
         itinerario_inicial: Optional[str] = None,
+        regimen_inicial: Optional[str] = None,
         parent=None,
     ):
         super().__init__(parent)
         self.records_service = records_service
         self.codigo_turno = str(codigo_turno or "").strip()
         self.itinerario_inicial = itinerario_inicial
+        self.regimen_inicial = regimen_inicial
 
         self._turno_actual: Optional[Dict[str, Any]] = None
         self._vueltas: List[Dict[str, Any]] = []
@@ -67,6 +69,20 @@ class DetalleTurnoDialog(BaseDialog):
         row1.addWidget(self.lbl_codigo)
         row1.addStretch()
 
+        row1.addWidget(QLabel("<b>Día / Régimen:</b>"))
+        self.combo_regimen = QComboBox()
+        self.combo_regimen.addItem("Automático", None)
+        self.combo_regimen.addItem("H - Hábil", "H")
+        self.combo_regimen.addItem("S - Sábado", "S")
+        self.combo_regimen.addItem("D - Domingo", "D")
+        self.combo_regimen.addItem("TODOS - Sin distinción", "TODOS")
+        if self.regimen_inicial:
+            idx_r = self.combo_regimen.findData(self.regimen_inicial)
+            if idx_r >= 0:
+                self.combo_regimen.setCurrentIndex(idx_r)
+        self.combo_regimen.currentIndexChanged.connect(self._on_itinerario_changed)
+        row1.addWidget(self.combo_regimen)
+
         row1.addWidget(QLabel("<b>Itinerario:</b>"))
         self.combo_itinerario = QComboBox()
         self.combo_itinerario.setMinimumWidth(160)
@@ -75,12 +91,14 @@ class DetalleTurnoDialog(BaseDialog):
         card_layout.addLayout(row1)
 
         row2 = QHBoxLayout()
+        self.lbl_regimen = QLabel("<b>Día:</b> -")
         self.lbl_tipo = QLabel("<b>Tipo:</b> -")
         self.lbl_deposito = QLabel("<b>Depósito:</b> -")
         self.lbl_toma = QLabel("<b>Toma de servicio:</b> -")
         self.lbl_deje = QLabel("<b>Deje de servicio:</b> -")
         self.lbl_duracion = QLabel("<b>Duración:</b> -")
 
+        row2.addWidget(self.lbl_regimen)
         row2.addWidget(self.lbl_tipo)
         row2.addWidget(self.lbl_deposito)
         row2.addWidget(self.lbl_toma)
@@ -155,10 +173,17 @@ class DetalleTurnoDialog(BaseDialog):
 
     def _cargar_turno(self) -> None:
         iti_sel = self.combo_itinerario.currentData()
-        t = self.records_service.obtener_turno_por_codigo(self.codigo_turno, itinerario=iti_sel)
+        reg_sel = self.combo_regimen.currentData() if hasattr(self, "combo_regimen") else None
+        t = self.records_service.obtener_turno_por_codigo(
+            self.codigo_turno,
+            itinerario=iti_sel,
+            regimen=reg_sel,
+        )
         self._turno_actual = t
         if t:
             self.lbl_codigo.setText(f"<h2>Turno: <span style='color: #2563EB;'>{t.get('codigo_turno', self.codigo_turno)}</span></h2>")
+            reg_lbl = self.records_service.formatear_regimen_turno(t.get("regimen"))
+            self.lbl_regimen.setText(f"<b>Día:</b> {reg_lbl}")
             self.lbl_tipo.setText(f"<b>Tipo:</b> {t.get('tipo_turno', '-')}")
             self.lbl_deposito.setText(f"<b>Depósito:</b> {t.get('deposito_base', '-')}")
             self.lbl_toma.setText(f"<b>Toma:</b> {t.get('toma_servicio', '-')}")
@@ -169,6 +194,7 @@ class DetalleTurnoDialog(BaseDialog):
             self.model.set_data(self._vueltas)
             self.lbl_conteo.setText(f"Total: {len(self._vueltas)} tramos en el turno")
         else:
+            self.lbl_regimen.setText("<b>Día:</b> -")
             self.lbl_tipo.setText("<b>Tipo:</b> -")
             self.lbl_deposito.setText("<b>Depósito:</b> -")
             self.lbl_toma.setText("<b>Toma:</b> -")
@@ -195,10 +221,11 @@ class DetalleTurnoDialog(BaseDialog):
             ws = wb.active
             ws.title = f"Turno {self.codigo_turno}"
 
-            ws.append(["Código Turno", "Turno Base", "Tipo", "Depósito", "Toma", "Deje", "Duración", "Itinerario"])
+            ws.append(["Código Turno", "Día", "Turno Base", "Tipo", "Depósito", "Toma", "Deje", "Duración", "Itinerario"])
             t = self._turno_actual or {}
             ws.append([
                 t.get("codigo_turno", self.codigo_turno),
+                self.records_service.formatear_regimen_turno(t.get("regimen")),
                 t.get("turno_base", ""),
                 t.get("tipo_turno", ""),
                 t.get("deposito_base", ""),

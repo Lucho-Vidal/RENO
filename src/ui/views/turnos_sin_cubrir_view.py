@@ -227,7 +227,14 @@ class TurnosSinCubrirView(QWidget):
             return
 
         from src.ui.views.dialogs.detalle_turno_dialog import DetalleTurnoDialog
-        dlg = DetalleTurnoDialog(self.records_service, codigo_turno=cod_turno, parent=self)
+        wd = self.date_picker.date().toPython().weekday()
+        reg_init = "H" if wd < 5 else ("S" if wd == 5 else "D")
+        dlg = DetalleTurnoDialog(
+            self.records_service,
+            codigo_turno=cod_turno,
+            regimen_inicial=reg_init,
+            parent=self,
+        )
         dlg.exec()
 
     def _actualizar_conteo(self) -> None:

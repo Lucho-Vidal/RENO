@@ -416,7 +416,12 @@ class OrdenamientoDialog(BaseMaximizedDialog):
             QMessageBox.information(self, "Cargar Turno", "Ingrese o seleccione un código de Turno primero.")
             return
         itin = self.combo_itinerario.currentText().strip()
-        t_info = self.records_service.obtener_turno_por_codigo(cod_turno, itinerario=itin or None)
+        reg = self.combo_regimen.currentText().strip() if hasattr(self, "combo_regimen") else ""
+        t_info = self.records_service.obtener_turno_por_codigo(
+            cod_turno,
+            itinerario=itin or None,
+            regimen=reg or None,
+        )
         if not t_info or not t_info.get("vueltas"):
             QMessageBox.information(
                 self, "Sin Vueltas", f"No se encontraron vueltas cargadas en itinerario para el turno '{cod_turno}'."

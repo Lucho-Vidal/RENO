@@ -86,11 +86,11 @@ class BuscadorTrenDialog(BaseDialog):
         layout.addWidget(self.lbl_conteo)
 
         headers = [
-            "TREN", "TURNO", "DEPÓSITO", "VUELTA", "REF", "ORIGEN", "SALIDA",
+            "TREN", "TURNO", "DÍA", "DEPÓSITO", "VUELTA", "REF", "ORIGEN", "SALIDA",
             "DESTINO", "LLEGADA", "OBS. VUELTA", "TOMA TURNO", "DEJE TURNO", "ITINERARIO",
         ]
         keys = [
-            "nro_tren", "codigo_turno", "deposito_base", "nro_vuelta", "ref", "origen",
+            "nro_tren", "codigo_turno", "regimen_label", "deposito_base", "nro_vuelta", "ref", "origen",
             "hora_salida", "destino", "hora_llegada", "obs_vuelta", "toma_servicio",
             "deje_servicio", "itinerario_vigente",
         ]
@@ -101,7 +101,7 @@ class BuscadorTrenDialog(BaseDialog):
         self.table_view.setSelectionBehavior(QTableView.SelectRows)
         self.table_view.setSelectionMode(QTableView.SingleSelection)
         self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.table_view.horizontalHeader().setSectionResizeMode(9, QHeaderView.Stretch)
+        self.table_view.horizontalHeader().setSectionResizeMode(10, QHeaderView.Stretch)
         layout.addWidget(self.table_view, 2)
 
         self.lbl_ords = QLabel("<b>📄 Ordenamientos Operativos vinculados al tren:</b>")
@@ -202,7 +202,7 @@ class BuscadorTrenDialog(BaseDialog):
             ws.title = f"Tren {tren}"
 
             headers = [
-                "Tren", "Código Turno", "Depósito", "Vuelta N°", "Ref", "Origen",
+                "Tren", "Código Turno", "Día", "Depósito", "Vuelta N°", "Ref", "Origen",
                 "Hora Salida", "Destino", "Hora Llegada", "Obs. Vuelta", "Toma", "Deje", "Itinerario"
             ]
             ws.append(headers)
@@ -226,6 +226,7 @@ class BuscadorTrenDialog(BaseDialog):
                 ws.append([
                     r.get("nro_tren"),
                     r.get("codigo_turno"),
+                    r.get("regimen_label") or r.get("regimen"),
                     r.get("deposito_base"),
                     r.get("nro_vuelta"),
                     r.get("ref"),

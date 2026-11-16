@@ -214,14 +214,23 @@ class TurnoDialog(BaseDialog):
         self.txt_duracion = QLineEdit("06:00")
         lay_datos.addWidget(self.txt_duracion, 4, 1)
 
+        lay_datos.addWidget(QLabel("Día / Régimen:"), 4, 2)
+        self.combo_regimen = QComboBox()
+        self.combo_regimen.addItem("H - Hábil", "H")
+        self.combo_regimen.addItem("S - Sábado", "S")
+        self.combo_regimen.addItem("D - Domingo / Feriado", "D")
+        self.combo_regimen.addItem("TODOS - Sin distinción", "TODOS")
+        self.combo_regimen.setCurrentIndex(3)
+        lay_datos.addWidget(self.combo_regimen, 4, 3)
+
         self.chk_activo = QCheckBox("Turno Activo")
         self.chk_activo.setChecked(True)
-        lay_datos.addWidget(self.chk_activo, 4, 2)
+        lay_datos.addWidget(self.chk_activo, 5, 0, 1, 2)
 
-        lay_datos.addWidget(QLabel("Observaciones:"), 5, 0)
+        lay_datos.addWidget(QLabel("Observaciones:"), 6, 0)
         self.txt_observaciones = QLineEdit()
         self.txt_observaciones.setPlaceholderText("Observaciones operativas del turno")
-        lay_datos.addWidget(self.txt_observaciones, 5, 1, 1, 3)
+        lay_datos.addWidget(self.txt_observaciones, 6, 1, 1, 3)
 
         main_layout.addWidget(grp_datos)
 
@@ -351,6 +360,13 @@ class TurnoDialog(BaseDialog):
         if t.get("duracion_jornada"):
             self.txt_duracion.setText(str(t["duracion_jornada"]))
 
+        reg_raw = str(t.get("regimen") or "TODOS").strip().upper()
+        idx_reg = self.combo_regimen.findData(reg_raw)
+        if idx_reg >= 0:
+            self.combo_regimen.setCurrentIndex(idx_reg)
+        else:
+            self.combo_regimen.setCurrentIndex(3)
+
         self.chk_activo.setChecked(bool(t.get("activo", 1)))
         self.txt_observaciones.setText(str(t.get("observaciones_turno") or ""))
 
@@ -417,6 +433,7 @@ class TurnoDialog(BaseDialog):
 
         payload = {
             "codigo_turno": codigo,
+            "regimen": self.combo_regimen.currentData() or "TODOS",
             "turno_base": base,
             "subindice": sub,
             "tipo_turno": self.combo_tipo.currentText().strip(),
