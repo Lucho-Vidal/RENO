@@ -354,6 +354,13 @@ def _ejecutar_via_qnam(
         raise TimeoutError(f"Tiempo de espera agotado ({timeout_sec}s) al conectar.")
 
     status_code = reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute) or 0
+    if not status_code:
+        try:
+            err_txt = reply.errorString()
+            if err_txt:
+                logger.warning("QNAM sin código HTTP para %s: %s", url, err_txt)
+        except Exception:
+            pass
     body = bytes(reply.readAll().data())
 
     resp_headers = {}
@@ -379,58 +386,75 @@ def _ejecutar_via_winhttp_com(
     """Ejecuta una petición usando el objeto COM WinHttp.WinHttpRequest.5.1 de Windows."""
     import win32com.client  # type: ignore
 
-    winhttp = win32com.client.Dispatch("WinHttp.WinHttpRequest.5.1")
-    ms = timeout_sec * 1000
-    winhttp.SetTimeouts(ms, ms, ms, ms)
-    try:
-        # WinHttpRequestOption_EnableRedirects = 6
-        winhttp.Option[6] = True
-    except Exception:
-        pass
-
-    winhttp.Open(method, url, False)
-
-    # 0 = HTTPREQUEST_PROXYSETTING_DEFAULT, 2 = HTTPREQUEST_PROXYSETTING_PROXY
-    proxy_clean = _limpiar_servidor_proxy(proxy_server)
-    if proxy_clean:
-        winhttp.SetProxy(2, proxy_clean)
-
-    # AutoLogonPolicy: 0 = AutoLogonPolicy_Always (envía credenciales NTLM/Kerberos de Windows automáticamente)
-    try:
-        winhttp.SetAutoLogonPolicy(0)
-    except Exception:
-        pass
-
-    if proxy_user:
+    coinit_ok = False
+    if sys.platform == "win32":
         try:
-            # 1 = HTTPREQUEST_SETCREDENTIALS_FOR_PROXY
-            winhttp.SetCredentials(proxy_user, proxy_pass or "", 1)
+            import pythoncom  # type: ignore
+            pythoncom.CoInitialize()
+            coinit_ok = True
         except Exception:
             pass
 
-    for k, v in headers.items():
-        winhttp.SetRequestHeader(k, v)
-
-    if data is not None:
-        winhttp.Send(data)
-    else:
-        winhttp.Send()
-
-    status = int(winhttp.Status)
     try:
-        raw_body = winhttp.ResponseBody
-        body = bytes(raw_body) if raw_body is not None else b""
-    except Exception:
-        body = winhttp.ResponseText.encode("utf-8", "ignore")
+        winhttp = win32com.client.Dispatch("WinHttp.WinHttpRequest.5.1")
+        ms = timeout_sec * 1000
+        winhttp.SetTimeouts(ms, ms, ms, ms)
+        try:
+            # WinHttpRequestOption_EnableRedirects = 6
+            winhttp.Option[6] = True
+        except Exception:
+            pass
 
-    raw_headers = winhttp.GetAllResponseHeaders()
-    resp_headers = {}
-    for line in raw_headers.splitlines():
-        if ":" in line:
-            hk, hv = line.split(":", 1)
-            resp_headers[hk.strip().lower()] = hv.strip()
+        winhttp.Open(method, url, False)
 
-    return status, body, resp_headers
+        # 0 = HTTPREQUEST_PROXYSETTING_DEFAULT, 2 = HTTPREQUEST_PROXYSETTING_PROXY
+        proxy_clean = _limpiar_servidor_proxy(proxy_server)
+        if proxy_clean:
+            winhttp.SetProxy(2, proxy_clean)
+
+        # AutoLogonPolicy: 0 = AutoLogonPolicy_Always (envía credenciales NTLM/Kerberos de Windows automáticamente)
+        try:
+            winhttp.SetAutoLogonPolicy(0)
+        except Exception:
+            pass
+
+        if proxy_user:
+            try:
+                # 1 = HTTPREQUEST_SETCREDENTIALS_FOR_PROXY
+                winhttp.SetCredentials(proxy_user, proxy_pass or "", 1)
+            except Exception:
+                pass
+
+        for k, v in headers.items():
+            winhttp.SetRequestHeader(k, v)
+
+        if data is not None:
+            winhttp.Send(data)
+        else:
+            winhttp.Send()
+
+        status = int(winhttp.Status)
+        try:
+            raw_body = winhttp.ResponseBody
+            body = bytes(raw_body) if raw_body is not None else b""
+        except Exception:
+            body = winhttp.ResponseText.encode("utf-8", "ignore")
+
+        raw_headers = winhttp.GetAllResponseHeaders()
+        resp_headers = {}
+        for line in raw_headers.splitlines():
+            if ":" in line:
+                hk, hv = line.split(":", 1)
+                resp_headers[hk.strip().lower()] = hv.strip()
+
+        return status, body, resp_headers
+    finally:
+        if coinit_ok:
+            try:
+                import pythoncom  # type: ignore
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
 
 
 def _ejecutar_via_powershell(
@@ -881,6 +905,13 @@ def _descargar_stream_via_qnam(
     cancel_timer.stop()
 
     status_code = int(reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute) or 0)
+    if not status_code and not cancelado and not timed_out:
+        try:
+            err_txt = reply.errorString()
+            if err_txt:
+                logger.warning("Descarga QNAM sin código HTTP para %s: %s", url, err_txt)
+        except Exception:
+            pass
     reply.deleteLater()
 
     if cancelado:

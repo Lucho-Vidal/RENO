@@ -175,9 +175,57 @@ class TestUpdaterService(unittest.TestCase):
             "supabase_url": "https://xyz.supabase.co",
         }
         urls = resolver_url_manifiesto(config)
-        self.assertIn("https://mi-servidor.com/version.json", urls)
+        self.assertEqual(urls[0], "https://mi-servidor.com/version.json")
+        self.assertIn("https://mi-servidor.com/reno_version.json", urls)
         self.assertIn("https://xyz.supabase.co/storage/v1/object/public/updates/version.json", urls)
-        self.assertIn("https://lucho-vidal.github.io/crono-pct-web/updates/reno_version.json", urls)
+        self.assertIn("https://xyz.supabase.co/storage/v1/object/public/updates/reno_version.json", urls)
+        self.assertFalse(any("crono-pct-web" in u for u in urls))
+
+    def test_resolver_url_manifiesto_normaliza_variantes_supabase_y_ignora_placeholder(self):
+        # 1. URL raíz del proyecto Supabase en updater_url
+        urls_root = resolver_url_manifiesto({"updater_url": "https://abc123.supabase.co"})
+        self.assertEqual(
+            urls_root,
+            [
+                "https://abc123.supabase.co/storage/v1/object/public/updates/version.json",
+                "https://abc123.supabase.co/storage/v1/object/public/updates/reno_version.json",
+            ],
+        )
+
+        # 2. URL del Dashboard de Supabase (incluyendo formato /storage/files/buckets/<bucket>)
+        urls_dash = resolver_url_manifiesto(
+            {"updater_url": "https://supabase.com/dashboard/project/projxyz/storage/files/buckets/ota_bucket"}
+        )
+        self.assertEqual(
+            urls_dash,
+            [
+                "https://projxyz.supabase.co/storage/v1/object/public/ota_bucket/version.json",
+                "https://projxyz.supabase.co/storage/v1/object/public/ota_bucket/reno_version.json",
+            ],
+        )
+
+        # 3. URL de objeto sin /public/ genera también el endpoint /public/
+        urls_obj = resolver_url_manifiesto(
+            {"updater_url": "https://projxyz.supabase.co/storage/v1/object/updates/version.json"}
+        )
+        self.assertIn("https://projxyz.supabase.co/storage/v1/object/updates/version.json", urls_obj)
+        self.assertIn("https://projxyz.supabase.co/storage/v1/object/public/updates/version.json", urls_obj)
+        self.assertIn("https://projxyz.supabase.co/storage/v1/object/public/updates/reno_version.json", urls_obj)
+
+        # 4. Carpeta de bucket no agrega la carpeta desnuda sin version.json
+        urls_dir = resolver_url_manifiesto(
+            {"updater_url": "https://projxyz.supabase.co/storage/v1/object/public/updates"}
+        )
+        self.assertEqual(
+            urls_dir,
+            [
+                "https://projxyz.supabase.co/storage/v1/object/public/updates/version.json",
+                "https://projxyz.supabase.co/storage/v1/object/public/updates/reno_version.json",
+            ],
+        )
+
+        # 5. URL de ejemplo 'tu-proyecto.supabase.co' se ignora por completo
+        self.assertEqual(resolver_url_manifiesto({"supabase_url": "https://tu-proyecto.supabase.co"}), [])
 
 
 class TestPublicadorYDotenv(unittest.TestCase):
@@ -606,6 +654,312 @@ class TestUpdaterConProxy(unittest.TestCase):
         self.assertEqual(mock_worker_cls.call_args.kwargs.get("config"), cfg_proxy)
         fake_worker.start.assert_called_once()
         dlg.close()
+
+
+class TestUpdaterOTAConfigYRegresiones(unittest.TestCase):
+    def setUp(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        self.temp_dir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_verificar_actualizacion_worker_sin_config_ni_fallback_ajeno(self):
+        from unittest.mock import patch
+        from src.services.updater_service import VerificarActualizacionWorker
+
+        worker_vacio = VerificarActualizacionWorker(
+            version_local="2.0.0",
+            config={"updater_url": "", "supabase_url": ""},
+        )
+        errores_vacio = []
+        al_dia_vacio = []
+        worker_vacio.error_verificacion.connect(errores_vacio.append)
+        worker_vacio.sistema_actualizado.connect(lambda: al_dia_vacio.append(True))
+
+        with patch("src.services.updater_service.ejecutar_request_supabase") as mock_req:
+            worker_vacio.run()
+
+        mock_req.assert_not_called()
+        self.assertEqual(al_dia_vacio, [])
+        self.assertEqual(len(errores_vacio), 1)
+        self.assertIn("No hay URL", errores_vacio[0])
+
+    def test_verificar_actualizacion_worker_error_404_loguea_warning_y_no_usa_otro_proyecto(self):
+        from unittest.mock import patch
+        from src.services.updater_service import VerificarActualizacionWorker
+
+        cfg = {
+            "updater_url": "https://xyiwvzfieualsfaifwfq.supabase.co/storage/v1/object/public/updates/version.json",
+            "supabase_url": "https://xyiwvzfieualsfaifwfq.supabase.co",
+        }
+        worker = VerificarActualizacionWorker(version_local="2.0.0", config=cfg)
+        errores = []
+        al_dia = []
+        urls_consultadas = []
+        worker.error_verificacion.connect(errores.append)
+        worker.sistema_actualizado.connect(lambda: al_dia.append(True))
+
+        def _fake_404(config, url, method="GET", headers=None, timeout_sec=12):
+            urls_consultadas.append(url)
+            return 404, b'{"statusCode":"404","error":"Bucket not found"}', {}
+
+        with patch("src.services.updater_service.ejecutar_request_supabase", side_effect=_fake_404), \
+             self.assertLogs("reno.UpdaterService", level="WARNING") as cm_logs:
+            worker.run()
+
+        self.assertEqual(al_dia, [])
+        self.assertEqual(len(errores), 1)
+        self.assertIn("HTTP 404", errores[0])
+        self.assertIn("xyiwvzfieualsfaifwfq.supabase.co", errores[0])
+        self.assertFalse(any("crono-pct-web" in u for u in urls_consultadas))
+        self.assertTrue(any("404" in msg for msg in cm_logs.output))
+
+    def test_verificar_actualizacion_worker_rechaza_json_sin_version(self):
+        from unittest.mock import patch
+        from src.services.updater_service import VerificarActualizacionWorker
+
+        cfg = {
+            "updater_url": "https://xyiwvzfieualsfaifwfq.supabase.co/storage/v1/object/public/updates/version.json",
+        }
+        worker = VerificarActualizacionWorker(version_local="2.0.0", config=cfg)
+        errores = []
+        al_dia = []
+        worker.error_verificacion.connect(errores.append)
+        worker.sistema_actualizado.connect(lambda: al_dia.append(True))
+
+        with patch(
+            "src.services.updater_service.ejecutar_request_supabase",
+            return_value=(200, b'{"status": "ok"}', {}),
+        ):
+            worker.run()
+
+        self.assertEqual(al_dia, [])
+        self.assertEqual(len(errores), 1)
+        self.assertIn("version", errores[0])
+
+    def test_publicador_sin_urls_no_inserta_crono_pct_web(self):
+        import sys
+        from unittest.mock import patch
+        import scripts.publicar_actualizacion as pub
+        import src.core.config as cfg_mod
+
+        salida_dir = self.temp_dir / "out"
+        salida_dir.mkdir()
+        argv = [
+            "publicar_actualizacion.py",
+            "--salida-dir",
+            str(salida_dir),
+            "--no-subir",
+        ]
+        old_env = {k: os.environ.get(k) for k in ("SUPABASE_URL", "SUPABASE_SERVICE_KEY", "SUPABASE_SERVICE_ROLE_KEY", "RENO_UPDATES_URL")}
+        try:
+            for k in old_env:
+                os.environ.pop(k, None)
+            with patch.object(sys, "argv", argv), \
+                 patch.object(pub, "ROOT_DIR", self.temp_dir), \
+                 patch.object(pub, "ENV_DOTENV", {}), \
+                 patch.object(cfg_mod, "APP_DATA_DIR", self.temp_dir), \
+                 patch.object(cfg_mod, "BASE_DIR", self.temp_dir), \
+                 patch.object(cfg_mod, "_DEFAULT_CONFIG_JSON_PATH", self.temp_dir / "reno_config.json"), \
+                 patch.object(cfg_mod, "CONFIG_JSON_PATH", self.temp_dir / "reno_config.json"):
+                pub.main()
+
+            manifiesto = json.loads((salida_dir / "version.json").read_text(encoding="utf-8"))
+            self.assertNotIn("crono-pct-web", json.dumps(manifiesto))
+            self.assertEqual(manifiesto["instalador_url"], "")
+        finally:
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_config_app_fallback_en_perfil_usuario_si_carpeta_no_escribible(self):
+        from unittest.mock import patch
+        import src.core.config as cfg_mod
+
+        default_cfg = self.temp_dir / "program_files" / "reno_config.json"
+        default_cfg.parent.mkdir(parents=True, exist_ok=True)
+        local_appdata = self.temp_dir / "local_appdata"
+        real_open = open
+
+        def _fake_open(file, mode="r", *args, **kwargs):
+            if Path(file) == default_cfg and "w" in mode:
+                raise PermissionError("Solo lectura")
+            return real_open(file, mode, *args, **kwargs)
+
+        old_env = {k: os.environ.get(k) for k in ("LOCALAPPDATA", "RENO_UPDATES_URL", "SUPABASE_URL")}
+        try:
+            os.environ["LOCALAPPDATA"] = str(local_appdata)
+            os.environ.pop("RENO_UPDATES_URL", None)
+            os.environ.pop("SUPABASE_URL", None)
+            url_ota = "https://xyiwvzfieualsfaifwfq.supabase.co/storage/v1/object/public/updates/version.json"
+
+            with patch.object(cfg_mod, "APP_DATA_DIR", default_cfg.parent), \
+                 patch.object(cfg_mod, "BASE_DIR", default_cfg.parent), \
+                 patch.object(cfg_mod, "_DEFAULT_CONFIG_JSON_PATH", default_cfg), \
+                 patch.object(cfg_mod, "CONFIG_JSON_PATH", default_cfg), \
+                 patch("builtins.open", side_effect=_fake_open):
+                ok = cfg_mod.guardar_configuracion_app({"updater_url": url_ota})
+                leido = cfg_mod.cargar_configuracion_app()
+
+            self.assertTrue(ok)
+            self.assertEqual(leido.get("updater_url"), url_ota)
+            self.assertTrue((local_appdata / "RENO" / "reno_config.json").exists())
+        finally:
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_admin_config_widget_protege_edicion_ota_sugiere_sanitizado_y_emite_senal(self):
+        from unittest.mock import patch
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        import src.core.config as cfg_mod
+        from src.data.database import DatabaseManager
+        from src.data.migrations import init_database_schema
+        from src.ui.views.dialogs.admin_dialogs import AdminConfigWidget
+
+        app = QApplication.instance() or QApplication([])
+        cfg_file = self.temp_dir / "reno_config.json"
+        cfg_file.write_text(
+            json.dumps({"supabase_url": "", "updater_url": ""}),
+            encoding="utf-8",
+        )
+        db = DatabaseManager(self.temp_dir / "cfg_test.sqlite", journal_mode="WAL")
+        init_database_schema(db)
+
+        old_env = {k: os.environ.get(k) for k in ("SUPABASE_URL", "SUPABASE_ANON_KEY", "RENO_UPDATES_URL")}
+        for k in old_env:
+            os.environ.pop(k, None)
+
+        widget = None
+        try:
+            with patch.object(cfg_mod, "APP_DATA_DIR", self.temp_dir), \
+                 patch.object(cfg_mod, "BASE_DIR", self.temp_dir), \
+                 patch.object(cfg_mod, "_DEFAULT_CONFIG_JSON_PATH", cfg_file), \
+                 patch.object(cfg_mod, "CONFIG_JSON_PATH", cfg_file):
+                widget = AdminConfigWidget(db)
+                self.assertFalse(widget._hay_cambios_sin_guardar)
+
+                # Simular edición del usuario en URL OTA y refresco periódico (forzar=False)
+                url_usuario = "https://xyiwvzfieualsfaifwfq.supabase.co/storage/v1/object/public/updates/version.json"
+                widget.txt_updater_url.setText(url_usuario)
+                self.assertTrue(widget._hay_cambios_sin_guardar)
+                widget.recargar(forzar=False)
+                self.assertEqual(widget.txt_updater_url.text(), url_usuario)
+
+                # Botón "Desde Supabase" sanitiza URLs del Dashboard de Supabase
+                widget.txt_supa_url.setText("https://supabase.com/dashboard/project/xyiwvzfieualsfaifwfq/settings/api")
+                widget._sugerir_url_updates()
+                self.assertEqual(widget.txt_updater_url.text(), url_usuario)
+
+                # Guardar emite señal configuracion_guardada y persiste la URL
+                guardadas = []
+                widget.configuracion_guardada.connect(lambda: guardadas.append(True))
+                with patch.object(QMessageBox, "information"), patch.object(QMessageBox, "warning"):
+                    widget._guardar()
+
+                self.assertEqual(guardadas, [True])
+                self.assertFalse(widget._hay_cambios_sin_guardar)
+                self.assertEqual(cfg_mod.cargar_configuracion_app().get("updater_url"), url_usuario)
+
+                # Si fallara la escritura JSON, no emite éxito ni limpia la marca de cambios
+                widget.txt_updater_url.setText("https://otra-url.supabase.co")
+                self.assertTrue(widget._hay_cambios_sin_guardar)
+                guardadas.clear()
+                with patch("src.core.config.guardar_configuracion_json", return_value=False), \
+                     patch.object(QMessageBox, "information") as m_info, \
+                     patch.object(QMessageBox, "warning") as m_warn:
+                    widget._guardar()
+
+                self.assertEqual(guardadas, [])
+                self.assertTrue(widget._hay_cambios_sin_guardar)
+                m_info.assert_not_called()
+                m_warn.assert_called_once()
+        finally:
+            if widget is not None:
+                widget.cerrar_limpiamente()
+                widget.close()
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_mainwindow_usa_config_ota_activa_y_sincroniza_al_guardar(self):
+        from unittest.mock import patch
+        from PySide6.QtWidgets import QApplication
+        import src.core.config as cfg_mod
+        from src.data.database import DatabaseManager
+        from src.data.migrations import init_database_schema
+        from src.domain.enums import PERMISOS_BASE
+        from src.services.auth_service import AuthService
+        from src.services.backup_service import BackupService
+        from src.services.excel_service import ExcelService
+        from src.services.pdf_service import PDFService
+        from src.services.records_service import RecordsService
+        from src.services.word_service import WordService
+        from src.ui.main_window import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        cfg_file = self.temp_dir / "reno_config.json"
+        cfg_file.write_text(json.dumps({"supabase_url": "", "updater_url": ""}), encoding="utf-8")
+
+        db = DatabaseManager(self.temp_dir / "mw_ota.sqlite", journal_mode="WAL")
+        init_database_schema(db)
+        auth = AuthService(db)
+        auth.inicializar_permisos(PERMISOS_BASE)
+        auth.crear_administrador_inicial("admin", "Admin123!", legajo=1001)
+        usuario = auth.autenticar("admin", "Admin123!")
+
+        old_env = {k: os.environ.get(k) for k in ("SUPABASE_URL", "SUPABASE_ANON_KEY", "RENO_UPDATES_URL")}
+        for k in old_env:
+            os.environ.pop(k, None)
+
+        win = None
+        try:
+            with patch.object(cfg_mod, "APP_DATA_DIR", self.temp_dir), \
+                 patch.object(cfg_mod, "BASE_DIR", self.temp_dir), \
+                 patch.object(cfg_mod, "_DEFAULT_CONFIG_JSON_PATH", cfg_file), \
+                 patch.object(cfg_mod, "CONFIG_JSON_PATH", cfg_file):
+                win = MainWindow(
+                    db=db,
+                    records_service=RecordsService(db),
+                    auth_service=auth,
+                    excel_service=ExcelService(db),
+                    pdf_service=PDFService(),
+                    word_service=WordService(),
+                    backup_service=BackupService(db),
+                    usuario_actual=usuario,
+                    supabase_sync=None,
+                )
+                # Simular estado de actualización cacheado previo y cambio sin guardar en widget_config
+                win._ultima_info_actualizacion = InfoActualizacion(version="2.0.1", fecha="16/11/2026", titulo="Old")
+                win.btn_actualizar.setVisible(True)
+
+                url_nueva = "https://xyiwvzfieualsfaifwfq.supabase.co/storage/v1/object/public/updates/version.json"
+                win.tab_administracion.widget_config.txt_updater_url.setText(url_nueva)
+                cfg_activa = win._obtener_config_updater_activa()
+                self.assertEqual(cfg_activa.get("updater_url"), url_nueva)
+
+                # Al guardar desde diálogo, recarga la pestaña de config y limpia la caché anterior
+                cfg_file.write_text(json.dumps({"updater_url": url_nueva}), encoding="utf-8")
+                win._on_configuracion_guardada_desde_dialog()
+                self.assertIsNone(win._ultima_info_actualizacion)
+                self.assertFalse(win.btn_actualizar.isVisible())
+                self.assertEqual(win.tab_administracion.widget_config.txt_updater_url.text(), url_nueva)
+        finally:
+            if win is not None:
+                win.close()
+                app.processEvents()
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
 
 if __name__ == "__main__":

@@ -52,8 +52,39 @@ ESPECIALIDADES_EMPLEADO = (
 
 DIAS_SEMANA = ("Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo")
 
-CONFIG_JSON_PATH = APP_DATA_DIR / "reno_config.json"
+_DEFAULT_CONFIG_JSON_PATH = APP_DATA_DIR / "reno_config.json"
+CONFIG_JSON_PATH = _DEFAULT_CONFIG_JSON_PATH
 PATH_BASE_FILE = APP_DATA_DIR / "config.json"
+
+
+def _ruta_config_usuario_fallback() -> Path | None:
+    """Retorna una ruta de configuración en el perfil del usuario si está disponible."""
+    base_usr = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+    if not base_usr:
+        return None
+    return Path(base_usr) / APP_NAME / "reno_config.json"
+
+
+def sanitizar_url_supabase(url: str | None) -> str:
+    """Normaliza URLs de Supabase (incluyendo URLs del Dashboard) a https://<ref>.supabase.co."""
+    if not url:
+        return ""
+    import re
+
+    u = str(url).strip().rstrip("/")
+    if not u:
+        return ""
+    m = re.search(r"supabase\.com/dashboard/project/([a-zA-Z0-9_\-]+)", u, re.IGNORECASE)
+    if m:
+        return f"https://{m.group(1)}.supabase.co"
+    u = re.sub(r"/(rest|api|storage)/v\d+.*$", "", u, flags=re.IGNORECASE).rstrip("/")
+    if not u:
+        return ""
+    if u.startswith("http://"):
+        u = "https://" + u[len("http://"):]
+    elif not u.startswith("https://"):
+        u = "https://" + u
+    return u.rstrip("/")
 
 
 def resource_path(rel_path: str | Path) -> Path:
@@ -258,9 +289,23 @@ def cargar_configuracion_app() -> dict[str, Any]:
         "proxy_auth": "manual_fijo",  # 'manual_fijo', 'sesion_reno', 'windows_sspi'
         "tema_visual": "claro",
     }
+
+    rutas_leer: list[Path] = []
     if CONFIG_JSON_PATH.exists():
+        rutas_leer.append(CONFIG_JSON_PATH)
+
+    if CONFIG_JSON_PATH == _DEFAULT_CONFIG_JSON_PATH:
+        usr_cfg = _ruta_config_usuario_fallback()
+        if usr_cfg and usr_cfg.exists():
+            try:
+                if not CONFIG_JSON_PATH.exists() or usr_cfg.stat().st_mtime >= CONFIG_JSON_PATH.stat().st_mtime:
+                    rutas_leer.append(usr_cfg)
+            except OSError:
+                rutas_leer.append(usr_cfg)
+
+    for ruta_cfg in rutas_leer:
         try:
-            with open(CONFIG_JSON_PATH, "r", encoding="utf-8") as f:
+            with open(ruta_cfg, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 for k, v in data.items():
                     if isinstance(v, (bool, int, float)) or v or k not in defaults:
@@ -271,12 +316,30 @@ def cargar_configuracion_app() -> dict[str, Any]:
 
 
 def guardar_configuracion_app(config: dict[str, Any]) -> bool:
-    """Guarda la configuración en reno_config.json."""
+    """Guarda la configuración en reno_config.json (con respaldo en perfil de usuario si aplica)."""
     try:
+        CONFIG_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(CONFIG_JSON_PATH, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
+        if CONFIG_JSON_PATH == _DEFAULT_CONFIG_JSON_PATH:
+            usr_cfg = _ruta_config_usuario_fallback()
+            if usr_cfg and usr_cfg.exists():
+                try:
+                    usr_cfg.unlink(missing_ok=True)
+                except OSError:
+                    pass
         return True
     except Exception:
+        if CONFIG_JSON_PATH == _DEFAULT_CONFIG_JSON_PATH:
+            usr_cfg = _ruta_config_usuario_fallback()
+            if usr_cfg is not None:
+                try:
+                    usr_cfg.parent.mkdir(parents=True, exist_ok=True)
+                    with open(usr_cfg, "w", encoding="utf-8") as f:
+                        json.dump(config, f, indent=2, ensure_ascii=False)
+                    return True
+                except Exception:
+                    return False
         return False
 
 

@@ -259,15 +259,7 @@ class MainWindow(QMainWindow):
 
             if self._tiene_permiso("sesion.configurar"):
                 act_cfg = menu_admin.addAction("⚙️ Configuración del Sistema")
-                act_cfg.triggered.connect(
-                    lambda: AdminConfigDialog(
-                        self.db,
-                        records_service=self.records_service,
-                        usuario_actual=self.usuario_actual,
-                        tiene_permiso_fn=self._tiene_permiso,
-                        parent=self,
-                    ).exec()
-                )
+                act_cfg.triggered.connect(self._abrir_config_sistema_dialog)
 
             if self._tiene_permiso("destinatarios_informe.administrar") or self._tiene_permiso("destinatarios_ordenamiento.administrar"):
                 act_dest = menu_admin.addAction("📧 Destinatarios de Correo")
@@ -433,6 +425,10 @@ class MainWindow(QMainWindow):
                 tiene_permiso_fn=self._tiene_permiso,
                 parent=self,
             )
+            if hasattr(self.tab_administracion, "widget_config"):
+                self.tab_administracion.widget_config.configuracion_guardada.connect(
+                    self._on_configuracion_guardada
+                )
             self.tabs.addTab(self.tab_administracion, "⚙️ Administración")
 
         self.tabs.currentChanged.connect(self._on_tab_changed)
@@ -934,6 +930,42 @@ class MainWindow(QMainWindow):
                 return
         self.close()
 
+    def _abrir_config_sistema_dialog(self) -> None:
+        """Abre la configuración del sistema y sincroniza la pestaña Administración al guardar."""
+        dlg = AdminConfigDialog(
+            self.db,
+            records_service=self.records_service,
+            usuario_actual=self.usuario_actual,
+            tiene_permiso_fn=self._tiene_permiso,
+            parent=self,
+        )
+        dlg.widget.configuracion_guardada.connect(self._on_configuracion_guardada_desde_dialog)
+        dlg.exec()
+
+    def _on_configuracion_guardada_desde_dialog(self) -> None:
+        self._on_configuracion_guardada()
+        if hasattr(self, "tab_administracion") and hasattr(self.tab_administracion, "widget_config"):
+            self.tab_administracion.widget_config.recargar(forzar=True)
+
+    def _on_configuracion_guardada(self) -> None:
+        self._ultima_info_actualizacion = None
+        self._ultima_actualizacion_obligatoria = False
+        self._ultima_config_updater = None
+        if hasattr(self, "btn_actualizar"):
+            self.btn_actualizar.setVisible(False)
+
+    def _obtener_config_updater_activa(self) -> Dict[str, Any]:
+        """Retorna la configuración de actualizaciones efectiva (incluyendo ediciones activas en pantalla)."""
+        cfg = cargar_configuracion_app()
+        tab_admin = getattr(self, "tab_administracion", None)
+        widget_cfg = getattr(tab_admin, "widget_config", None)
+        if widget_cfg is not None and (
+            getattr(widget_cfg, "_hay_cambios_sin_guardar", False)
+            or (hasattr(widget_cfg, "txt_updater_url") and widget_cfg.txt_updater_url.isModified())
+        ):
+            cfg.update(widget_cfg._recopilar_config_pantalla())
+        return cfg
+
     def _acerca_de(self) -> None:
         dlg = AcercaDialog(self)
         dlg.btn_buscar_updates.clicked.connect(lambda: self.buscar_actualizaciones_manual(parent_dialog=dlg))
@@ -943,7 +975,7 @@ class MainWindow(QMainWindow):
         """Acción al hacer clic en el botón de actualización en la cabecera."""
         if hasattr(self, "_ultima_info_actualizacion") and self._ultima_info_actualizacion:
             es_obligatoria = getattr(self, "_ultima_actualizacion_obligatoria", False)
-            cfg = cargar_configuracion_app()
+            cfg = self._obtener_config_updater_activa()
             dlg = ActualizacionDialog(
                 self._ultima_info_actualizacion,
                 es_obligatoria=es_obligatoria,
@@ -1017,7 +1049,7 @@ class MainWindow(QMainWindow):
         """Verificación manual de actualizaciones invocada por el usuario con retroalimentación explícita."""
         if getattr(self, "_cerrando", False):
             return
-        cfg = cargar_configuracion_app()
+        cfg = self._obtener_config_updater_activa()
         self._ultima_config_updater = cfg
         if getattr(self, "_worker_manual_updater", None) is not None:
             desvincular_worker_seguro(self._worker_manual_updater, timeout_ms=200, cancelar=True)

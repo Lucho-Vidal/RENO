@@ -536,12 +536,12 @@ def main():
         if sb_url:
             base_url = f"{sb_url}/storage/v1/object/public/{bucket}"
         else:
-            base_url = "https://lucho-vidal.github.io/crono-pct-web/updates"
+            base_url = ""
 
     nombre_exe = ruta_instalador.name if ruta_instalador else f"RENO_Setup_v{version}.exe"
-    instalador_url = f"{base_url}/{nombre_exe}"
+    instalador_url = f"{base_url}/{nombre_exe}" if base_url else ""
 
-    partes_urls = [f"{base_url}/{p}" for p in partes_generadas] if partes_generadas else []
+    partes_urls = [f"{base_url}/{p}" if base_url else p for p in partes_generadas] if partes_generadas else []
 
     # 3. Novedades y metadatos
     titulo = args.titulo or f"Actualización General de Rendimiento y Cobertura v{version}"

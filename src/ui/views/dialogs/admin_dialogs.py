@@ -1982,6 +1982,8 @@ class AdminDestinatariosDialog(BaseMaximizedDialog):
 class AdminConfigWidget(QWidget):
     """Panel de configuración de parámetros operativos, seguridad, sincronización Supabase y destinatarios."""
 
+    configuracion_guardada = Signal()
+
     def __init__(
         self,
         db,
@@ -2000,6 +2002,8 @@ class AdminConfigWidget(QWidget):
         self.tiene_permiso_fn = tiene_permiso_fn
         self._cerrando = False
         self._worker_cfg_updater = None
+        self._cargando_datos = False
+        self._hay_cambios_sin_guardar = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2265,10 +2269,49 @@ class AdminConfigWidget(QWidget):
         layout.addLayout(btn_box)
 
         self.tabs.currentChanged.connect(self._al_cambiar_pestana)
+        self._conectar_cambios_config()
 
         self._cargar()
 
-    def recargar(self) -> None:
+    def _conectar_cambios_config(self) -> None:
+        for line_edit in (
+            self.txt_db_path,
+            self.txt_dom,
+            self.txt_supa_url,
+            self.txt_supa_key,
+            self.txt_proxy_sso,
+            self.txt_proxy_host,
+            self.txt_proxy_user,
+            self.txt_proxy_pass,
+            self.txt_updater_url,
+        ):
+            line_edit.textChanged.connect(self._marcar_modificado)
+
+        for spin in (
+            self.spin_edit,
+            self.spin_elim,
+            self.spin_exp,
+            self.spin_toast,
+            self.spin_sync_interval,
+            self.spin_proxy_port,
+        ):
+            spin.valueChanged.connect(self._marcar_modificado)
+
+        for chk in (self.chk_notif, self.chk_sync_enabled, self.chk_updater_auto):
+            chk.toggled.connect(self._marcar_modificado)
+
+        for cmb in (self.cmb_proxy_mode, self.cmb_proxy_auth):
+            cmb.currentIndexChanged.connect(self._marcar_modificado)
+
+    def _marcar_modificado(self, *_args) -> None:
+        if not getattr(self, "_cargando_datos", False):
+            self._hay_cambios_sin_guardar = True
+
+    def recargar(self, forzar: bool = True) -> None:
+        if not forzar and getattr(self, "_hay_cambios_sin_guardar", False):
+            if hasattr(self, "widget_destinatarios"):
+                self.widget_destinatarios.recargar()
+            return
         self._cargar()
         if hasattr(self, "widget_destinatarios"):
             self.widget_destinatarios.recargar()
@@ -2331,6 +2374,7 @@ class AdminConfigWidget(QWidget):
         self.btn_buscar_updates_cfg.clicked.connect(self._comprobar_actualizaciones_manual)
         b_act.addWidget(self.btn_buscar_updates_cfg)
         self.lbl_updater_status = QLabel("Listo para comprobar.")
+        self.lbl_updater_status.setWordWrap(True)
         self.lbl_updater_status.setStyleSheet("color: #64748B; font-size: 11px; margin-left: 10px;")
         b_act.addWidget(self.lbl_updater_status, 1)
         layout.addWidget(box_actions)
@@ -2339,15 +2383,16 @@ class AdminConfigWidget(QWidget):
         return widget
 
     def _sugerir_url_updates(self) -> None:
-        sb_url = self.txt_supa_url.text().strip().rstrip("/")
+        from src.core.config import cargar_configuracion_json, sanitizar_url_supabase
+
+        sb_url = sanitizar_url_supabase(self.txt_supa_url.text().strip())
         if not sb_url:
             QMessageBox.information(
                 self,
                 "URL de Updates",
-                "Ingrese primero la 'Supabase URL' en la pestaña Sincronización y Red.",
+                "Ingrese primero la 'Supabase URL' en la pestaña Sincronización Supabase.",
             )
             return
-        from src.core.config import cargar_configuracion_json
 
         bucket = str(cargar_configuracion_json().get("supabase_storage_bucket") or "updates").strip().strip("/") or "updates"
         self.txt_updater_url.setText(f"{sb_url}/storage/v1/object/public/{bucket}/version.json")
@@ -2378,7 +2423,8 @@ class AdminConfigWidget(QWidget):
             if getattr(self, "_cerrando", False):
                 return
             self.btn_buscar_updates_cfg.setEnabled(True)
-            self.lbl_updater_status.setText(f"🚀 Nueva versión disponible: v{info.version}")
+            aviso_pend = " (cambios sin guardar)" if getattr(self, "_hay_cambios_sin_guardar", False) else ""
+            self.lbl_updater_status.setText(f"🚀 Nueva versión disponible: v{info.version}{aviso_pend}")
             from src.ui.views.dialogs.actualizacion_dialog import ActualizacionDialog
 
             dlg = ActualizacionDialog(info, es_obligatoria=es_obligatoria, parent=self, config=cfg_temp)
@@ -2388,8 +2434,13 @@ class AdminConfigWidget(QWidget):
             if getattr(self, "_cerrando", False):
                 return
             self.btn_buscar_updates_cfg.setEnabled(True)
-            self.lbl_updater_status.setText("✅ Ya tienes la última versión instalada.")
-            QMessageBox.information(self, "Actualizaciones", "La aplicación está actualizada a la última versión.")
+            aviso_pend = (
+                " — Recordá pulsar 'Guardar Configuración' para conservar los cambios."
+                if getattr(self, "_hay_cambios_sin_guardar", False)
+                else ""
+            )
+            self.lbl_updater_status.setText(f"✅ Ya tienes la última versión instalada.{aviso_pend}")
+            QMessageBox.information(self, "Actualizaciones", f"La aplicación está actualizada a la última versión.{aviso_pend}")
 
         def _on_error(err: str) -> None:
             if getattr(self, "_cerrando", False):
@@ -2522,49 +2573,54 @@ class AdminConfigWidget(QWidget):
         }
 
     def _cargar(self) -> None:
-        from src.core.config import obtener_ruta_base_datos
-        sqlite_actual, _ = obtener_ruta_base_datos()
-        self.txt_db_path.setText(str(sqlite_actual))
+        self._cargando_datos = True
+        try:
+            from src.core.config import obtener_ruta_base_datos
+            sqlite_actual, _ = obtener_ruta_base_datos()
+            self.txt_db_path.setText(str(sqlite_actual))
 
-        with self.db.read_connection() as conn:
-            rows = dict(conn.execute("SELECT clave, valor FROM configuracion").fetchall())
-        self.spin_edit.setValue(int(rows.get("editar_horas", 24)))
-        self.spin_elim.setValue(int(rows.get("eliminar_horas", 72)))
-        self.spin_exp.setValue(int(rows.get("clave_expiracion_dias", 90)))
-        self.txt_dom.setText(str(rows.get("correo_dominio", "@trenesargentinos.gob.ar")))
-        self.chk_notif.setChecked(bool(int(rows.get("notificaciones_activo", 1))))
-        self.spin_toast.setValue(int(rows.get("toast_duracion", 6)))
+            with self.db.read_connection() as conn:
+                rows = dict(conn.execute("SELECT clave, valor FROM configuracion").fetchall())
+            self.spin_edit.setValue(int(rows.get("editar_horas", 24)))
+            self.spin_elim.setValue(int(rows.get("eliminar_horas", 72)))
+            self.spin_exp.setValue(int(rows.get("clave_expiracion_dias", 90)))
+            self.txt_dom.setText(str(rows.get("correo_dominio", "@trenesargentinos.gob.ar")))
+            self.chk_notif.setChecked(bool(int(rows.get("notificaciones_activo", 1))))
+            self.spin_toast.setValue(int(rows.get("toast_duracion", 6)))
 
-        from src.core.config import cargar_configuracion_json
-        app_cfg = cargar_configuracion_json()
-        self.chk_sync_enabled.setChecked(bool(app_cfg.get("autosync_habilitado", False)))
-        self.txt_supa_url.setText(str(app_cfg.get("supabase_url", "")))
-        self.txt_supa_key.setText(str(app_cfg.get("supabase_anon_key", "")))
-        self.spin_sync_interval.setValue(int(app_cfg.get("autosync_intervalo_min", 5)))
+            from src.core.config import cargar_configuracion_json
+            app_cfg = cargar_configuracion_json()
+            self.chk_sync_enabled.setChecked(bool(app_cfg.get("autosync_habilitado", False)))
+            self.txt_supa_url.setText(str(app_cfg.get("supabase_url", "")))
+            self.txt_supa_key.setText(str(app_cfg.get("supabase_anon_key", "")))
+            self.spin_sync_interval.setValue(int(app_cfg.get("autosync_intervalo_min", 5)))
 
-        modo_guardado = app_cfg.get("proxy_mode", MODO_DIRECTO)
-        idx_modo = self.cmb_proxy_mode.findData(modo_guardado)
-        if idx_modo >= 0:
-            self.cmb_proxy_mode.setCurrentIndex(idx_modo)
+            modo_guardado = app_cfg.get("proxy_mode", MODO_DIRECTO)
+            idx_modo = self.cmb_proxy_mode.findData(modo_guardado)
+            if idx_modo >= 0:
+                self.cmb_proxy_mode.setCurrentIndex(idx_modo)
 
-        self.txt_proxy_sso.setText(str(app_cfg.get("proxy_sso_server", "")))
-        self.lbl_proxy_sso_info.setText(f"<b>Proxy detectado en Windows:</b> {detectar_proxy_sistema(app_cfg)}")
+            self.txt_proxy_sso.setText(str(app_cfg.get("proxy_sso_server", "")))
+            self.lbl_proxy_sso_info.setText(f"<b>Proxy detectado en Windows:</b> {detectar_proxy_sistema(app_cfg)}")
 
-        auth_guardado = app_cfg.get("proxy_auth", AUTH_MANUAL_FIJO)
-        idx_auth = self.cmb_proxy_auth.findData(auth_guardado)
-        if idx_auth >= 0:
-            self.cmb_proxy_auth.setCurrentIndex(idx_auth)
+            auth_guardado = app_cfg.get("proxy_auth", AUTH_MANUAL_FIJO)
+            idx_auth = self.cmb_proxy_auth.findData(auth_guardado)
+            if idx_auth >= 0:
+                self.cmb_proxy_auth.setCurrentIndex(idx_auth)
 
-        self.txt_proxy_host.setText(str(app_cfg.get("proxy_host", "")))
-        self.spin_proxy_port.setValue(int(app_cfg.get("proxy_port", 8080) or 8080))
-        self.txt_proxy_user.setText(str(app_cfg.get("proxy_user", "")))
-        self.txt_proxy_pass.setText(str(app_cfg.get("proxy_pass", "")))
+            self.txt_proxy_host.setText(str(app_cfg.get("proxy_host", "")))
+            self.spin_proxy_port.setValue(int(app_cfg.get("proxy_port", 8080) or 8080))
+            self.txt_proxy_user.setText(str(app_cfg.get("proxy_user", "")))
+            self.txt_proxy_pass.setText(str(app_cfg.get("proxy_pass", "")))
 
-        self.txt_updater_url.setText(str(app_cfg.get("updater_url", "")))
-        self.chk_updater_auto.setChecked(bool(app_cfg.get("updater_auto_check", True)))
+            self.txt_updater_url.setText(str(app_cfg.get("updater_url", "")))
+            self.chk_updater_auto.setChecked(bool(app_cfg.get("updater_auto_check", True)))
 
-        self._actualizar_visibilidad_proxy()
-        self._actualizar_visor_logs()
+            self._actualizar_visibilidad_proxy()
+            self._actualizar_visor_logs()
+        finally:
+            self._cargando_datos = False
+            self._hay_cambios_sin_guardar = False
 
     def _probar_conexion_supa(self) -> None:
         cfg_test = self._recopilar_config_pantalla()
@@ -2741,7 +2797,7 @@ class AdminConfigWidget(QWidget):
         app_cfg["updater_url"] = self.txt_updater_url.text().strip()
         app_cfg["updater_auto_check"] = self.chk_updater_auto.isChecked()
 
-        guardar_configuracion_json(app_cfg)
+        ok_json = guardar_configuracion_json(app_cfg)
         aplicar_configuracion_proxy(app_cfg)
 
         from src.core.config import guardar_ruta_base_datos, obtener_ruta_base_datos
@@ -2755,6 +2811,17 @@ class AdminConfigWidget(QWidget):
                     f"Para que el cambio surta efecto y comenzar a operar con la nueva base, reinicie la aplicación."
                 )
 
+        if not ok_json:
+            QMessageBox.warning(
+                self,
+                "Error al guardar configuración",
+                "Se guardaron los parámetros en la base de datos local, pero no se pudo escribir 'reno_config.json'.\n"
+                "Verifique los permisos de escritura en la carpeta de la aplicación o en %LOCALAPPDATA%\\RENO.",
+            )
+            return
+
+        self._hay_cambios_sin_guardar = False
+        self.configuracion_guardada.emit()
         QMessageBox.information(self, "Éxito", f"Configuración guardada exitosamente.{aviso_db}")
 
 
@@ -2789,8 +2856,8 @@ class AdminConfigDialog(BaseMaximizedDialog):
         btn_cerrar.clicked.connect(self.accept)
         layout.addWidget(btn_cerrar, alignment=Qt.AlignRight)
 
-    def recargar(self) -> None:
-        self.widget.recargar()
+    def recargar(self, forzar: bool = True) -> None:
+        self.widget.recargar(forzar=forzar)
 
     def done(self, result: int) -> None:
         if hasattr(self, "widget") and hasattr(self.widget, "cerrar_limpiamente"):

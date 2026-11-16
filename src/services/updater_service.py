@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -58,19 +59,18 @@ except ImportError:
         def instance():
             return None
 
-from src.core.config import APP_NAME, APP_VERSION, cargar_configuracion_app
+from src.core.config import APP_NAME, APP_VERSION, cargar_configuracion_app, sanitizar_url_supabase
 from src.core.logger import get_logger
 from src.core.proxy import (
     MODO_DIRECTO,
     OfflineError,
     ProxyAuthError,
+    construir_headers_supabase,
     descargar_archivo_con_proxy,
     ejecutar_request_supabase,
 )
 
 logger = get_logger("UpdaterService")
-
-URL_WEB_FALLBACK_DEFAULT = "https://lucho-vidal.github.io/crono-pct-web/updates/reno_version.json"
 
 
 @dataclass
@@ -209,34 +209,104 @@ def calcular_sha256(ruta_archivo: str | Path, chunk_size: int = 65536) -> str:
     return h.hexdigest().lower()
 
 
+def _expandir_candidatos_url_custom(url_custom: str, bucket: str) -> list[str]:
+    """Normaliza la URL explícita de Actualizaciones (OTA) soportando JSON, bucket o raíz Supabase."""
+    raw = str(url_custom or "").strip()
+    if not raw:
+        return []
+    if not raw.lower().startswith(("http://", "https://")):
+        raw = f"https://{raw.lstrip('/')}"
+
+    # Si pegaron la URL del Dashboard de Supabase (supabase.com/dashboard/project/<ref>...)
+    m_dash = re.search(r"supabase\.com/dashboard/project/([a-zA-Z0-9_\-]+)", raw, re.IGNORECASE)
+    if m_dash:
+        proj = m_dash.group(1)
+        m_bkt = re.search(r"/storage(?:/files)?/buckets/([^/?#]+)", raw, re.IGNORECASE)
+        bkt = (m_bkt.group(1).strip() if m_bkt else bucket) or "updates"
+        return [
+            f"https://{proj}.supabase.co/storage/v1/object/public/{bkt}/version.json",
+            f"https://{proj}.supabase.co/storage/v1/object/public/{bkt}/reno_version.json",
+        ]
+
+    parsed = urllib.parse.urlparse(raw)
+    path_clean = parsed.path or ""
+    path_lower = path_clean.lower()
+    netloc_lower = (parsed.netloc or "").lower()
+
+    # 1. URL directa a archivo .json
+    if path_lower.endswith(".json"):
+        candidatos = [raw]
+        alt_filename = ""
+        nombre_archivo = path_clean.rsplit("/", 1)[-1].lower()
+        if nombre_archivo == "version.json":
+            alt_filename = "reno_version.json"
+        elif nombre_archivo == "reno_version.json":
+            alt_filename = "version.json"
+
+        if "/storage/v1/object/" in path_lower and "/storage/v1/object/public/" not in path_lower:
+            public_path = re.sub(
+                r"/storage/v1/object/(?!public/)",
+                "/storage/v1/object/public/",
+                path_clean,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            candidatos.append(urllib.parse.urlunparse(parsed._replace(path=public_path)))
+            if alt_filename:
+                alt_pub = public_path.rsplit("/", 1)[0] + f"/{alt_filename}"
+                candidatos.append(urllib.parse.urlunparse(parsed._replace(path=alt_pub)))
+        if alt_filename:
+            alt_path = path_clean.rsplit("/", 1)[0] + f"/{alt_filename}"
+            candidatos.append(urllib.parse.urlunparse(parsed._replace(path=alt_path)))
+        return candidatos
+
+    # 2. Raíz de proyecto Supabase (https://<ref>.supabase.co) sin ruta de Storage
+    if netloc_lower.endswith(".supabase.co") and path_clean.strip("/") == "":
+        return [
+            f"https://{parsed.netloc}/storage/v1/object/public/{bucket}/version.json",
+            f"https://{parsed.netloc}/storage/v1/object/public/{bucket}/reno_version.json",
+        ]
+
+    # 3. Carpeta / Bucket / Prefijo (sin .json final)
+    base_custom = raw.rstrip("/")
+    candidatos_dir: list[str] = []
+    if "/storage/v1/object/" in path_lower and "/storage/v1/object/public/" not in path_lower:
+        public_base = re.sub(
+            r"/storage/v1/object/(?!public/)",
+            "/storage/v1/object/public/",
+            base_custom,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        candidatos_dir.append(f"{public_base}/version.json")
+        candidatos_dir.append(f"{public_base}/reno_version.json")
+    candidatos_dir.append(f"{base_custom}/version.json")
+    candidatos_dir.append(f"{base_custom}/reno_version.json")
+    return candidatos_dir
+
+
 def resolver_url_manifiesto(config: dict[str, Any] | None = None) -> list[str]:
     """Resuelve la lista de URLs posibles para consultar version.json con prioridad:
-    1. Endpoint explícito configurado en reno_config.json ('updater_url').
+    1. Endpoint explícito configurado en reno_config.json / UI OTA ('updater_url').
     2. Supabase Storage bucket configurado (por defecto 'updates') del proyecto configurado.
-    3. Endpoint web público de fallback en GitHub Pages.
     """
     cfg = config if config is not None else cargar_configuracion_app()
     urls: list[str] = []
+    bucket = str(cfg.get("supabase_storage_bucket") or "updates").strip().strip("/") or "updates"
 
-    # 1. URL explícita si el usuario o admin la configuró
+    # 1. URL explícita configurada en Actualizaciones (OTA) o RENO_UPDATES_URL
     url_custom = str(cfg.get("updater_url", "")).strip()
     if url_custom:
-        urls.append(url_custom)
-        if not url_custom.lower().endswith(".json"):
-            base_custom = url_custom.rstrip("/")
-            urls.append(f"{base_custom}/version.json")
-            urls.append(f"{base_custom}/reno_version.json")
+        urls.extend(_expandir_candidatos_url_custom(url_custom, bucket))
 
     # 2. Supabase Storage bucket configurado (por defecto 'updates')
-    sb_url = str(cfg.get("supabase_url", "")).strip().rstrip("/")
-    bucket = str(cfg.get("supabase_storage_bucket") or "updates").strip().strip("/") or "updates"
+    sb_raw = str(cfg.get("supabase_url", "")).strip()
+    sb_url = sanitizar_url_supabase(sb_raw) if sb_raw else ""
     if sb_url:
-        urls.append(f"{sb_url}/storage/v1/object/public/{bucket}/version.json")
-        urls.append(f"{sb_url}/storage/v1/object/public/{bucket}/reno_version.json")
-
-    # 3. Fallback web GitHub Pages
-    urls.append("https://lucho-vidal.github.io/crono-pct-web/updates/reno_version.json")
-    urls.append("https://lucho-vidal.github.io/crono-pct-web/updates/version.json")
+        host_sb = (urllib.parse.urlparse(sb_url).netloc or "").lower()
+        if host_sb and "tu-proyecto." not in host_sb:
+            urls.append(f"{sb_url}/storage/v1/object/public/{bucket}/version.json")
+            urls.append(f"{sb_url}/storage/v1/object/public/{bucket}/reno_version.json")
 
     # Filtrar duplicados manteniendo orden
     vistas = set()
@@ -246,6 +316,21 @@ def resolver_url_manifiesto(config: dict[str, Any] | None = None) -> list[str]:
             vistas.add(u)
             resultado.append(u)
     return resultado
+
+
+def _construir_headers_para_url(url: str, base_headers: dict[str, str], config: dict[str, Any] | None) -> dict[str, str]:
+    """Agrega headers de Supabase solo cuando la URL apunta a Storage autenticado del proyecto."""
+    hdrs = dict(base_headers)
+    cfg = config or {}
+    parsed = urllib.parse.urlparse(url)
+    path_lower = (parsed.path or "").lower()
+    if "/storage/v1/object/" in path_lower and "/storage/v1/object/public/" not in path_lower:
+        sb_url = sanitizar_url_supabase(str(cfg.get("supabase_url") or ""))
+        sb_host = (urllib.parse.urlparse(sb_url).netloc or "").lower()
+        api_key = str(cfg.get("supabase_anon_key") or cfg.get("supabase_service_role_key") or "").strip()
+        if api_key and (not sb_host or parsed.netloc.lower() == sb_host):
+            hdrs.update(construir_headers_supabase(api_key))
+    return hdrs
 
 
 def dividir_archivo(
@@ -305,22 +390,36 @@ class VerificarActualizacionWorker(QThread):
 
     def run(self) -> None:
         candidatos_url = resolver_url_manifiesto(self.config)
-        headers = {
+        if not candidatos_url:
+            msg_vacio = (
+                "No hay URL de actualizaciones (OTA) ni URL de Supabase configurada. "
+                "Configure la URL en Administración > Configuración > Actualizaciones (OTA)."
+            )
+            logger.warning(msg_vacio)
+            self.error_verificacion.emit(msg_vacio)
+            return
+
+        base_headers = {
             "User-Agent": f"RENO-Updater/{self.version_local} (Windows; Python)",
             "Accept": "application/json",
             "Cache-Control": "no-cache",
         }
 
+        primer_error = ""
         ultimo_error = ""
         error_proxy = ""
         manifiesto_data: dict[str, Any] | None = None
+        proxy_mode = (self.config or {}).get("proxy_mode", MODO_DIRECTO)
 
-        for url in candidatos_url:
+        for idx, url in enumerate(candidatos_url, start=1):
+            headers = _construir_headers_para_url(url, base_headers, self.config)
             try:
-                logger.debug(
-                    "Consultando manifiesto de actualización en: %s (proxy_mode=%s)",
+                logger.info(
+                    "Consultando manifiesto de actualización (%d/%d): %s (proxy_mode=%s)",
+                    idx,
+                    len(candidatos_url),
                     url,
-                    (self.config or {}).get("proxy_mode", MODO_DIRECTO),
+                    proxy_mode,
                 )
                 status, body, _ = ejecutar_request_supabase(
                     config=self.config,
@@ -331,26 +430,43 @@ class VerificarActualizacionWorker(QThread):
                 )
                 if status == 200:
                     raw = body.decode("utf-8", errors="ignore")
-                    manifiesto_data = json.loads(raw)
+                    parsed = json.loads(raw)
+                    if not isinstance(parsed, dict) or not str(parsed.get("version") or "").strip():
+                        msg_inv = f"El recurso en {url} no contiene un campo 'version' válido."
+                        logger.warning(msg_inv)
+                        primer_error = primer_error or msg_inv
+                        ultimo_error = msg_inv
+                        continue
+                    manifiesto_data = parsed
                     logger.info("Manifiesto obtenido exitosamente desde: %s", url)
                     break
                 if status == 407:
                     error_proxy = "HTTP 407: El proxy corporativo requiere autenticación válida."
+                    primer_error = primer_error or error_proxy
                     ultimo_error = error_proxy
                     logger.warning("Proxy rechazó consulta de actualización (%s): HTTP 407", url)
                 else:
-                    ultimo_error = f"HTTP {status} desde {url}"
-                    logger.debug("Respuesta no exitosa al consultar %s: HTTP %s", url, status)
+                    snippet = body.decode("utf-8", errors="ignore").strip().replace("\r", " ").replace("\n", " ")[:180]
+                    detalle = f" ({snippet})" if snippet else ""
+                    msg_err = f"HTTP {status} desde {url}{detalle}"
+                    primer_error = primer_error or msg_err
+                    ultimo_error = msg_err
+                    logger.warning("Respuesta no exitosa al consultar %s: %s", url, msg_err)
             except ProxyAuthError as e:
                 error_proxy = str(e)
+                primer_error = primer_error or error_proxy
                 ultimo_error = error_proxy
                 logger.warning("Error de autenticación proxy en %s: %s", url, e)
             except (OfflineError, Exception) as e:
-                ultimo_error = str(e)
-                logger.debug("Fallo al consultar %s: %s", url, e)
+                msg_exc = f"Error al consultar {url}: {e}"
+                primer_error = primer_error or msg_exc
+                ultimo_error = msg_exc
+                logger.warning("Fallo al consultar %s: %s", url, e)
 
         if not manifiesto_data:
-            self.error_verificacion.emit(error_proxy or ultimo_error or "No se pudo obtener el manifiesto de actualización")
+            self.error_verificacion.emit(
+                error_proxy or primer_error or ultimo_error or "No se pudo obtener el manifiesto de actualización"
+            )
             return
 
         try:
@@ -415,7 +531,7 @@ class DescargarActualizacionWorker(QThread):
         bytes_acumulados = 0
         tiempo_inicio = time.time()
         ultimo_reporte = 0.0
-        headers_dl = {"User-Agent": f"RENO-Downloader/{APP_VERSION}"}
+        headers_base_dl = {"User-Agent": f"RENO-Downloader/{APP_VERSION}"}
 
         try:
             # Abrimos el archivo final en modo escritura binaria
@@ -423,6 +539,7 @@ class DescargarActualizacionWorker(QThread):
                 for idx, url in enumerate(lista_urls):
                     if self._cancelado:
                         break
+                    headers_dl = _construir_headers_para_url(url, headers_base_dl, self.config)
 
                     logger.info(
                         "Descargando segmento %d/%d desde: %s (proxy_mode=%s)",
