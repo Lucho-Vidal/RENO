@@ -1660,6 +1660,21 @@ class RecordsService:
                    WHERE nr.activo = 1 AND n.activo = 1"""
             ).fetchall()
 
+            novedades_propias_rows = conn.execute(
+                """SELECT id, legajo, novedad, fecha_inicio, fecha_fin, observaciones
+                   FROM novedades
+                   WHERE activo = 1
+                   ORDER BY id DESC"""
+            ).fetchall()
+
+        con_novedad_por_legajo: Dict[int, Dict[str, Any]] = {}
+        for np in novedades_propias_rows:
+            np_ini, np_fin_opt = self._rango_fechas_reemplazo(np["fecha_inicio"], np["fecha_fin"], None)
+            if np_ini and np_ini <= f_sol and (np_fin_opt is None or f_sol <= np_fin_opt):
+                leg_np = int(np["legajo"])
+                if leg_np not in con_novedad_por_legajo:
+                    con_novedad_por_legajo[leg_np] = dict(np)
+
         ocupados_por_legajo = {}
         for r in reemplazos_activos:
             r_ini, r_fin_opt = self._rango_fechas_reemplazo(r["fecha_inicio"], r["fecha_fin"], r["fecha_fin_novedad"])
@@ -1668,8 +1683,19 @@ class RecordsService:
 
         libres = []
         ocupados = []
+        con_novedad = []
         for emp in empleados_ciclo:
             leg = int(emp["legajo"])
+            nov_propia = con_novedad_por_legajo.get(leg)
+            if nov_propia:
+                item_nov = dict(emp)
+                item_nov["novedad_propia_id"] = nov_propia["id"]
+                item_nov["novedad_propia"] = nov_propia["novedad"]
+                item_nov["novedad_fecha_inicio"] = nov_propia["fecha_inicio"]
+                item_nov["novedad_fecha_fin"] = nov_propia["fecha_fin"] or "-"
+                con_novedad.append(item_nov)
+                continue
+
             asignacion = ocupados_por_legajo.get(leg)
             if asignacion:
                 item = dict(emp)
@@ -1691,7 +1717,7 @@ class RecordsService:
             else:
                 libres.append(dict(emp))
 
-        return {"libres": libres, "ocupados": ocupados}
+        return {"libres": libres, "ocupados": ocupados, "con_novedad": con_novedad}
 
     def guardar_jornada_ciclo(
         self,
@@ -1803,7 +1829,7 @@ class RecordsService:
                 """SELECT id, novedad, fecha_inicio, fecha_fin, observaciones
                    FROM novedades
                    WHERE legajo = ? AND activo = 1
-                   ORDER BY id ASC""",
+                   ORDER BY id DESC""",
                 (int(legajo_ciclo),),
             ).fetchall()
 

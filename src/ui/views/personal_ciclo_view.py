@@ -133,6 +133,7 @@ class PersonalCicloView(QWidget):
         self.excel_service = excel_service
         self.usuario_actual = usuario_actual or {}
         self.tiene_permiso_fn = tiene_permiso_fn
+        self._calendarios_abiertos: List[CalendarioCicloDialog] = []
 
         self._init_ui()
         self.consultar()
@@ -295,6 +296,17 @@ class PersonalCicloView(QWidget):
 
     def _abrir_calendario(self, emp: Dict[str, Any]) -> None:
         qdate = self.date_picker.date()
+        leg_obj = emp.get("legajo")
+        for abierto in list(self._calendarios_abiertos):
+            try:
+                if abierto.empleado.get("legajo") == leg_obj:
+                    abierto.raise_()
+                    abierto.activateWindow()
+                    return
+            except RuntimeError:
+                if abierto in self._calendarios_abiertos:
+                    self._calendarios_abiertos.remove(abierto)
+
         dlg = CalendarioCicloDialog(
             empleado=emp,
             records_service=self.records_service,
@@ -306,8 +318,18 @@ class PersonalCicloView(QWidget):
             tiene_permiso_fn=self.tiene_permiso_fn,
             parent=self,
         )
-        dlg.exec()
-        self.consultar()
+        dlg.setWindowModality(Qt.NonModal)
+        dlg.setModal(False)
+        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+        self._calendarios_abiertos.append(dlg)
+
+        def _on_closed(_res: int = 0, ref_dlg: CalendarioCicloDialog = dlg) -> None:
+            if ref_dlg in self._calendarios_abiertos:
+                self._calendarios_abiertos.remove(ref_dlg)
+            self.consultar()
+
+        dlg.finished.connect(_on_closed)
+        dlg.show()
 
     def _on_soltado_en_libres(self, emp: Dict[str, Any]) -> None:
         """Al arrastrar un agente ocupado hacia la grilla de libres: liberar del relevo."""
