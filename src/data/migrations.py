@@ -315,6 +315,21 @@ def init_database_schema(db: DatabaseManager) -> None:
             CREATE INDEX IF NOT EXISTS idx_tren_paradas_tren ON tren_paradas(nro_tren);
             CREATE INDEX IF NOT EXISTS idx_tren_paradas_itin ON tren_paradas(itinerario);
 
+            -- Catálogo de estaciones, siglas y alias operativos
+            CREATE TABLE IF NOT EXISTS estaciones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                codigo_origen INTEGER,
+                nombre TEXT UNIQUE NOT NULL,
+                sigla TEXT NOT NULL DEFAULT '',
+                aliases TEXT NOT NULL DEFAULT '',
+                activo INTEGER NOT NULL DEFAULT 1 CHECK (activo IN (0, 1)),
+                created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_estaciones_nombre ON estaciones(nombre);
+            CREATE INDEX IF NOT EXISTS idx_estaciones_sigla ON estaciones(sigla);
+
             -- Módulo de Ordenamientos Operativos
             CREATE TABLE IF NOT EXISTS ordenamientos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -433,6 +448,27 @@ def init_database_schema(db: DatabaseManager) -> None:
 
         conn.execute("INSERT OR IGNORE INTO tipos_novedad(nombre, dias, exportar_descubierto) VALUES ('Informe', 1, 0);")
         conn.execute("INSERT OR IGNORE INTO tipos_novedad(nombre, dias, exportar_descubierto) VALUES ('Dona sangre', 1, 1);")
+
+        # Poblar catálogo base de estaciones y abreviaturas si está vacío
+        cnt_est = conn.execute("SELECT COUNT(*) FROM estaciones;").fetchone()[0]
+        if cnt_est == 0:
+            from src.domain.estaciones import ESTACIONES_BASE
+
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO estaciones (codigo_origen, nombre, sigla, aliases, activo)
+                VALUES (?, ?, ?, ?, 1);
+                """,
+                [
+                    (
+                        st.get("codigo_origen"),
+                        st["nombre"],
+                        st.get("sigla", ""),
+                        ", ".join(st.get("aliases") or ()),
+                    )
+                    for st in ESTACIONES_BASE
+                ],
+            )
 
         # Poblar tren_paradas automáticamente desde turnos_vueltas si está vacía
         cnt_paradas = conn.execute("SELECT COUNT(*) FROM tren_paradas;").fetchone()[0]

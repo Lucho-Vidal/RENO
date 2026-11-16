@@ -46,7 +46,10 @@ from src.ui.views.dialogs.admin_dialogs import (
     AdminRolesDialog,
     AdminUsuariosDialog,
 )
-from src.ui.views.dialogs.admin_tren_paradas_dialog import AdminTrenParadasDialog
+from src.ui.views.dialogs.admin_tren_paradas_dialog import (
+    AdminEstacionesDialog,
+    AdminTrenParadasDialog,
+)
 from src.ui.views.dialogs.admin_turnos_dialog import AdminTurnosDialog
 from src.ui.views.dialogs.base_dialog import BaseDialog, BaseMaximizedDialog
 from src.ui.views.dialogs.buscador_tren_dialog import BuscadorTrenDialog
@@ -199,6 +202,7 @@ def test_all_dialogs_close_button_flags_and_exec_close(tmp_path: Path):
         ("BaseDialog", lambda: BaseDialog()),
         ("AcercaDialog", lambda: AcercaDialog()),
         ("ActualizacionDialog(opcional)", lambda: ActualizacionDialog(env["info_upd"], es_obligatoria=False)),
+        ("AdminEstacionesDialog", lambda: AdminEstacionesDialog(env["records"], usuario_actual=env["usuario"])),
         ("BuscadorTrenDialog", lambda: BuscadorTrenDialog(env["records"], env["excel"])),
         (
             "AsignarJornadaDialog",
@@ -254,7 +258,7 @@ def test_all_dialogs_close_button_flags_and_exec_close(tmp_path: Path):
         ("OrdenamientoDialog", lambda: OrdenamientoDialog(env["records"], pdf_service=env["pdf"], usuario_actual=env["usuario"])),
     ]
 
-    assert len(standard_factories) == 17
+    assert len(standard_factories) == 18
     assert len(maximized_factories) == 14
 
     for nombre, factory in standard_factories:

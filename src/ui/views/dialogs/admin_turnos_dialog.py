@@ -5,6 +5,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -41,6 +42,7 @@ class AdminTurnosWidget(QWidget):
         self.tiene_permiso_fn = tiene_permiso_fn
 
         self._turnos: List[Dict[str, Any]] = []
+        self.hubo_cambios: bool = False
         self._init_ui()
         self.recargar()
 
@@ -76,6 +78,11 @@ class AdminTurnosWidget(QWidget):
         self.btn_eliminar.setObjectName("btnDanger")
         self.btn_eliminar.clicked.connect(self._eliminar_definitivo)
         bar_top.addWidget(self.btn_eliminar)
+
+        self.btn_importar_turnos = QPushButton("📥 Importar Turnos")
+        self.btn_importar_turnos.setObjectName("btnSecondary")
+        self.btn_importar_turnos.clicked.connect(self._importar_turnos)
+        bar_top.addWidget(self.btn_importar_turnos)
 
         bar_top.addStretch()
 
@@ -171,6 +178,7 @@ class AdminTurnosWidget(QWidget):
             parent=self,
         )
         if dlg.exec():
+            self.hubo_cambios = True
             self.recargar()
 
     def _modificar_turno(self) -> None:
@@ -190,6 +198,7 @@ class AdminTurnosWidget(QWidget):
             parent=self,
         )
         if dlg.exec():
+            self.hubo_cambios = True
             self.recargar()
 
     def _toggle_estado(self) -> None:
@@ -212,6 +221,7 @@ class AdminTurnosWidget(QWidget):
                 user_id=u_id,
                 windows_user=win_u,
             )
+            self.hubo_cambios = True
             self.recargar()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"No se pudo cambiar el estado del turno:\n{e}")
@@ -243,9 +253,36 @@ class AdminTurnosWidget(QWidget):
                 user_id=u_id,
                 windows_user=win_u,
             )
+            self.hubo_cambios = True
             self.recargar()
         except Exception as e:
             QMessageBox.critical(self, "Error al Eliminar", f"No se pudo eliminar el turno:\n{e}")
+
+    def _importar_turnos(self) -> None:
+        if not (self._can("turnos.crear") or self._can("turnos.administrar")):
+            QMessageBox.warning(self, "Permiso Denegado", "No posee permisos para importar turnos de itinerario.")
+            return
+
+        f_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Seleccionar Archivo de Turnos e Itinerario (Excel)",
+            "",
+            "Archivos Excel (*.xlsx *.xlsm)",
+        )
+        if not f_path:
+            return
+
+        try:
+            turnos, vueltas = self.records_service.importar_itinerario_excel(f_path)
+            self.hubo_cambios = True
+            self.recargar()
+            QMessageBox.information(
+                self,
+                "Turnos Importados",
+                f"Se importaron con éxito {turnos} turnos y {vueltas} vueltas desde:\n{f_path}",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Error al Importar", f"No se pudo procesar el archivo:\n{e}")
 
 
 class AdminTurnosDialog(BaseMaximizedDialog):

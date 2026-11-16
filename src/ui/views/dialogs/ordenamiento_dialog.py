@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from PySide6.QtCore import QDate, QTime, Qt
 from PySide6.QtWidgets import (
     QComboBox,
+    QCompleter,
     QDateEdit,
     QFileDialog,
     QGridLayout,
@@ -68,6 +69,8 @@ class OrdenamientoDialog(BaseMaximizedDialog):
         self._empleados_cache = self.records_service.listar_empleados(incluir_inactivos=False)
         self._personal_estacion_cache = self.records_service.listar_personal_estacion(incluir_inactivos=False)
         self._paradas_tren_actual: Dict[str, str] = {}
+        self._paradas_tren_lista: List[Dict[str, str]] = []
+        self._estaciones_sugerencias: List[str] = self.records_service.obtener_sugerencias_estaciones()
 
         self._init_ui()
         if self.ordenamiento_existente:
@@ -133,10 +136,11 @@ class OrdenamientoDialog(BaseMaximizedDialog):
         lay_cab.addWidget(QLabel("Itinerario:"), 1, 6)
         self.combo_itinerario = QComboBox()
         self.combo_itinerario.setEditable(True)
-        for it in self.records_service.listar_itinerarios_disponibles():
+        for it in self.records_service.listar_itinerarios_paradas():
             self.combo_itinerario.addItem(it)
         if self.combo_itinerario.count() == 0:
             self.combo_itinerario.addItem("H45")
+        self.combo_itinerario.currentTextChanged.connect(self._on_contexto_paradas_changed)
         lay_cab.addWidget(self.combo_itinerario, 1, 7)
 
         # Fila 2: Ciclo/Turno, Régimen, REF de Dotación, Emisor, Usuario Windows
@@ -158,6 +162,7 @@ class OrdenamientoDialog(BaseMaximizedDialog):
         lay_cab.addWidget(QLabel("Régimen:"), 2, 3)
         self.combo_regimen = QComboBox()
         self.combo_regimen.addItems(["LV", "S", "D"])
+        self.combo_regimen.currentIndexChanged.connect(self._on_contexto_paradas_changed)
         lay_cab.addWidget(self.combo_regimen, 2, 4)
 
         self.lbl_ref_dotacion = QLabel("REF de PC (*):")
@@ -213,6 +218,7 @@ class OrdenamientoDialog(BaseMaximizedDialog):
         self.combo_tramo_origen = QComboBox()
         self.combo_tramo_origen.setEditable(True)
         self.combo_tramo_origen.setMinimumWidth(150)
+        self._configurar_completer_estacion(self.combo_tramo_origen)
         self.combo_tramo_origen.currentTextChanged.connect(self._on_origen_selected)
         builder_grid.addWidget(self.combo_tramo_origen, 1, 2)
 
@@ -226,6 +232,7 @@ class OrdenamientoDialog(BaseMaximizedDialog):
         self.combo_tramo_destino = QComboBox()
         self.combo_tramo_destino.setEditable(True)
         self.combo_tramo_destino.setMinimumWidth(150)
+        self._configurar_completer_estacion(self.combo_tramo_destino)
         self.combo_tramo_destino.currentTextChanged.connect(self._on_destino_selected)
         builder_grid.addWidget(self.combo_tramo_destino, 1, 4)
 
@@ -428,27 +435,62 @@ class OrdenamientoDialog(BaseMaximizedDialog):
             })
         self._render_tramos()
 
+    def _configurar_completer_estacion(self, combo: QComboBox, extras: Optional[List[str]] = None) -> None:
+        items: List[str] = []
+        vistos = set()
+        for cand in [*(extras or []), *self._estaciones_sugerencias]:
+            t = str(cand or "").strip()
+            if t and t.lower() not in vistos:
+                vistos.add(t.lower())
+                items.append(t)
+        comp = QCompleter(items, combo)
+        comp.setCaseSensitivity(Qt.CaseInsensitive)
+        comp.setFilterMode(Qt.MatchContains)
+        comp.setCompletionMode(QCompleter.PopupCompletion)
+        combo.setCompleter(comp)
+
+    def _on_contexto_paradas_changed(self) -> None:
+        if hasattr(self, "txt_tramo_tren") and self.txt_tramo_tren.text().strip():
+            self._on_tramo_tren_changed(self.txt_tramo_tren.text())
+
     def _on_tramo_tren_changed(self, nro_tren: str) -> None:
         nt = (nro_tren or "").strip()
         self._paradas_tren_actual.clear()
+        self._paradas_tren_lista = []
         if not nt:
-            return
-        itin = self.combo_itinerario.currentText().strip()
-        paradas = self.records_service.obtener_estaciones_y_horarios_por_tren(nt, itinerario=itin or None)
-        if not paradas:
+            self._configurar_completer_estacion(self.combo_tramo_origen)
+            self._configurar_completer_estacion(self.combo_tramo_destino)
             return
 
+        itin = self.combo_itinerario.currentText().strip()
+        reg = self.combo_regimen.currentText().strip() if hasattr(self, "combo_regimen") else None
+        paradas = self.records_service.obtener_estaciones_y_horarios_por_tren(
+            nt,
+            itinerario=itin or None,
+            regimen=reg or None,
+        )
+        if not paradas:
+            self._configurar_completer_estacion(self.combo_tramo_origen)
+            self._configurar_completer_estacion(self.combo_tramo_destino)
+            return
+
+        self._paradas_tren_lista = list(paradas)
         self.combo_tramo_origen.blockSignals(True)
         self.combo_tramo_destino.blockSignals(True)
         self.combo_tramo_origen.clear()
         self.combo_tramo_destino.clear()
 
+        nombres_paradas: List[str] = []
         for p in paradas:
             est = p["estacion"]
             hr = p["hora"]
             self._paradas_tren_actual[est.upper()] = hr
             self.combo_tramo_origen.addItem(est)
             self.combo_tramo_destino.addItem(est)
+            nombres_paradas.append(est)
+
+        self._configurar_completer_estacion(self.combo_tramo_origen, extras=nombres_paradas)
+        self._configurar_completer_estacion(self.combo_tramo_destino, extras=nombres_paradas)
 
         if len(paradas) >= 1:
             self.combo_tramo_origen.setCurrentIndex(0)
@@ -460,13 +502,28 @@ class OrdenamientoDialog(BaseMaximizedDialog):
         self.combo_tramo_origen.blockSignals(False)
         self.combo_tramo_destino.blockSignals(False)
 
+    def _resolver_hora_estacion(self, estacion: str) -> Optional[str]:
+        txt = (estacion or "").strip()
+        if not txt:
+            return None
+        hr_directo = self._paradas_tren_actual.get(txt.upper())
+        if hr_directo:
+            return hr_directo
+        if not self._paradas_tren_lista:
+            return None
+        idx_est = self.records_service._obtener_indice_estaciones()
+        for p in self._paradas_tren_lista:
+            if idx_est.estaciones_equivalentes(p["estacion"], txt):
+                return p["hora"]
+        return None
+
     def _on_origen_selected(self, estacion: str) -> None:
-        hr = self._paradas_tren_actual.get((estacion or "").strip().upper())
+        hr = self._resolver_hora_estacion(estacion)
         if hr:
             self.txt_tramo_h_sal.setText(hr)
 
     def _on_destino_selected(self, estacion: str) -> None:
-        hr = self._paradas_tren_actual.get((estacion or "").strip().upper())
+        hr = self._resolver_hora_estacion(estacion)
         if hr:
             self.txt_tramo_h_lleg.setText(hr)
 
@@ -479,8 +536,12 @@ class OrdenamientoDialog(BaseMaximizedDialog):
             parent=self,
         )
         dlg.exec()
+        self._estaciones_sugerencias = self.records_service.obtener_sugerencias_estaciones()
         if tren_actual:
             self._on_tramo_tren_changed(tren_actual)
+        else:
+            self._configurar_completer_estacion(self.combo_tramo_origen)
+            self._configurar_completer_estacion(self.combo_tramo_destino)
 
     def _agregar_tramo_tabla(self) -> None:
         self._sincronizar_ediciones_celdas()

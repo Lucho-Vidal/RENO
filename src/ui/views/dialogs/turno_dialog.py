@@ -5,6 +5,7 @@ from PySide6.QtCore import QTime, Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QCompleter,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.core.logger import get_logger
+from src.domain.estaciones import obtener_completado_estaciones
 from src.services.records_service import RecordsService
 from src.ui.views.dialogs.base_dialog import BaseDialog
 
@@ -44,6 +46,12 @@ class VueltaItemDialog(BaseDialog):
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
+        parent_obj = self.parent()
+        if parent_obj is not None and hasattr(parent_obj, "records_service"):
+            sugerencias_est = parent_obj.records_service.obtener_sugerencias_estaciones()
+        else:
+            sugerencias_est = obtener_completado_estaciones()
+
         self.txt_tren = QLineEdit(str(self.vuelta_existente.get("nro_tren") or ""))
         self.txt_tren.setPlaceholderText("Ej: 2301, 105, LIVIANO")
         form.addRow("N° de Tren:", self.txt_tren)
@@ -53,7 +61,11 @@ class VueltaItemDialog(BaseDialog):
         form.addRow("Referencia (Ref):", self.txt_ref)
 
         self.txt_origen = QLineEdit(str(self.vuelta_existente.get("origen") or ""))
-        self.txt_origen.setPlaceholderText("Ej: PLAZA, K.4, TEMPERLEY")
+        self.txt_origen.setPlaceholderText("Ej: PLAZA, PC, K.4, TY, TEMPERLEY")
+        comp_orig = QCompleter(sugerencias_est, self.txt_origen)
+        comp_orig.setCaseSensitivity(Qt.CaseInsensitive)
+        comp_orig.setFilterMode(Qt.MatchContains)
+        self.txt_origen.setCompleter(comp_orig)
         form.addRow("Estación Origen:", self.txt_origen)
 
         self.time_salida = QTimeEdit()
@@ -66,7 +78,11 @@ class VueltaItemDialog(BaseDialog):
         form.addRow("Hora Salida:", self.time_salida)
 
         self.txt_destino = QLineEdit(str(self.vuelta_existente.get("destino") or ""))
-        self.txt_destino.setPlaceholderText("Ej: LA PLATA, GLEW, EZEIZA")
+        self.txt_destino.setPlaceholderText("Ej: LA PLATA, GLEW, EZEIZA, ZZ")
+        comp_dest = QCompleter(sugerencias_est, self.txt_destino)
+        comp_dest.setCaseSensitivity(Qt.CaseInsensitive)
+        comp_dest.setFilterMode(Qt.MatchContains)
+        self.txt_destino.setCompleter(comp_dest)
         form.addRow("Estación Destino:", self.txt_destino)
 
         self.time_llegada = QTimeEdit()

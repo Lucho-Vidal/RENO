@@ -209,12 +209,6 @@ class BuscadorTurnosView(QWidget):
 
         row1.addStretch(1)
 
-        if self._can("turnos.administrar") or self._can("turnos.crear"):
-            self.btn_importar = QPushButton("📥 Importar Itinerario (Excel)")
-            self.btn_importar.setObjectName("btnSecondary")
-            self.btn_importar.clicked.connect(self._importar_itinerario_excel)
-            row1.addWidget(self.btn_importar)
-
         if self._can("turnos.administrar") or self._can("turnos.editar"):
             self.btn_admin_turnos = QPushButton("⚙️ Administrar Turnos")
             self.btn_admin_turnos.setObjectName("btnSecondary")
@@ -509,7 +503,8 @@ class BuscadorTurnosView(QWidget):
             tiene_permiso_fn=self.tiene_permiso_fn,
             parent=self,
         )
-        if dlg.exec():
+        res = dlg.exec()
+        if res or getattr(dlg.widget, "hubo_cambios", False):
             self.cargar_itinerarios()
             self.consultar()
 
@@ -517,10 +512,19 @@ class BuscadorTurnosView(QWidget):
         """Abre el diálogo CRUD e importador Excel de paradas y horarios de paso por tren."""
         from src.ui.views.dialogs.admin_tren_paradas_dialog import AdminTrenParadasDialog
 
+        tren_sel = self.txt_criterio.text().strip()
+        sel_vueltas = self.table_vueltas.selectionModel().selectedRows()
+        if sel_vueltas:
+            fila_v = self.model_vueltas.get_row(sel_vueltas[0].row())
+            if fila_v and fila_v.get("nro_tren"):
+                v_tren = str(fila_v["nro_tren"]).strip()
+                if not tren_sel or not any(str(v.get("nro_tren") or "").strip() == tren_sel for v in self._vueltas_todas):
+                    tren_sel = v_tren
+
         dlg = AdminTrenParadasDialog(
             self.records_service,
             usuario_actual=self.usuario_actual,
-            tren_inicial=self.txt_criterio.text().strip(),
+            tren_inicial=tren_sel,
             parent=self,
         )
         dlg.exec()
@@ -543,28 +547,6 @@ class BuscadorTurnosView(QWidget):
         )
         if dlg.exec():
             self.consultar()
-
-    def _importar_itinerario_excel(self) -> None:
-        f_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Seleccionar Archivo de Itinerario Normalizado",
-            "",
-            "Archivos Excel (*.xlsx *.xlsm)",
-        )
-        if not f_path:
-            return
-
-        try:
-            turnos, vueltas = self.records_service.importar_itinerario_excel(f_path)
-            QMessageBox.information(
-                self,
-                "Itinerario Importado",
-                f"Se importaron con éxito {turnos} turnos y {vueltas} vueltas desde:\n{f_path}",
-            )
-            self.cargar_itinerarios()
-            self.consultar()
-        except Exception as e:
-            QMessageBox.critical(self, "Error al Importar", f"No se pudo procesar el archivo:\n{e}")
 
     def _exportar_grilla_excel(self) -> None:
         if not self._turnos_resultados:

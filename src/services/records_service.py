@@ -6,15 +6,24 @@ la auditoría y el encolamiento para sincronización Supabase.
 
 import calendar
 import json
+import re
 import sqlite3
 import unicodedata
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from src.core.config import obtener_usuario_windows
 from src.core.logger import get_logger
 from src.data.database import DatabaseManager
 from src.domain.enums import EstadoCobertura, EstadoDiaCiclo, SyncOperation
+from src.domain.estaciones import (
+    ESTACIONES_BASE,
+    CatalogoEstacionesIndex,
+    _clave_compacta_estacion,
+    normalizar_texto_estacion,
+    parsear_aliases_estacion,
+)
 from src.domain.models import (
     CambioTurno,
     CicloJornada,
@@ -3041,17 +3050,313 @@ class RecordsService:
             self._enqueue_sync(conn, "turnos_itinerario", turno_id, "DELETE", {"id": turno_id})
 
     # ---------------------------------------------------------
+    # Catálogo de Estaciones, Siglas y Equivalencias
+    # ---------------------------------------------------------
+
+    def _obtener_indice_estaciones(
+        self,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> CatalogoEstacionesIndex:
+        """Construye un índice en memoria con el catálogo actual de estaciones activas."""
+        def _cargar(c: sqlite3.Connection) -> List[Dict[str, Any]]:
+            try:
+                rows = c.execute(
+                    """SELECT id, codigo_origen, nombre, sigla, aliases, activo
+                       FROM estaciones
+                       WHERE activo = 1
+                       ORDER BY COALESCE(codigo_origen, 999999) ASC, nombre ASC"""
+                ).fetchall()
+                return [dict(r) for r in rows]
+            except sqlite3.OperationalError:
+                return []
+
+        if conn is not None:
+            data = _cargar(conn)
+        else:
+            with self.db.read_connection() as read_conn:
+                data = _cargar(read_conn)
+
+        return CatalogoEstacionesIndex(data if data else ESTACIONES_BASE)
+
+    def obtener_sugerencias_estaciones(self) -> List[str]:
+        """Devuelve la lista de nombres, alias y siglas de estaciones para autocompletado."""
+        return self._obtener_indice_estaciones().obtener_completado_estaciones()
+
+    def listar_estaciones(
+        self,
+        criterio: str = "",
+        incluir_inactivos: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Lista el catálogo de estaciones filtrado por nombre, sigla, alias o código."""
+        query = """
+            SELECT id, codigo_origen, nombre, sigla, aliases, activo, created_at, updated_at
+            FROM estaciones
+        """
+        if not incluir_inactivos:
+            query += " WHERE activo = 1"
+        query += " ORDER BY COALESCE(codigo_origen, 999999) ASC, nombre ASC"
+
+        with self.db.read_connection() as conn:
+            rows = [dict(r) for r in conn.execute(query).fetchall()]
+
+        crit = str(criterio or "").strip()
+        if not crit:
+            return rows
+
+        crit_norm = normalizar_texto_estacion(crit)
+        crit_up = crit.upper()
+        idx = CatalogoEstacionesIndex([dict(r, activo=1) for r in rows] if rows else ESTACIONES_BASE)
+        es_sigla_exacta = crit_up in idx._por_sigla_upper
+        filtradas: List[Dict[str, Any]] = []
+        for r in rows:
+            cod_txt = str(r.get("codigo_origen") or "").strip()
+            nom_norm = normalizar_texto_estacion(r.get("nombre"))
+            sig_up = str(r.get("sigla") or "").strip().upper()
+            als_norm = normalizar_texto_estacion(r.get("aliases"))
+            if es_sigla_exacta:
+                coincide = (
+                    cod_txt == crit
+                    or sig_up == crit_up
+                    or idx.coincide_filtro_estacion(r.get("nombre"), crit)
+                )
+            else:
+                coincide = (
+                    cod_txt == crit
+                    or (crit_norm and crit_norm in nom_norm)
+                    or (crit_norm and crit_norm in als_norm)
+                    or (sig_up and (crit_up == sig_up or crit_up in sig_up))
+                    or idx.coincide_filtro_estacion(r.get("nombre"), crit)
+                )
+            if coincide:
+                filtradas.append(r)
+        return filtradas
+
+    def guardar_estacion(
+        self,
+        datos: Dict[str, Any],
+        estacion_id: Optional[int] = None,
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> int:
+        """Crea o actualiza una estación con su sigla y alias equivalentes."""
+        nombre = str(datos.get("nombre") or "").strip()
+        if not nombre:
+            raise ValueError("El nombre de la estación es obligatorio.")
+
+        sigla = str(datos.get("sigla") or "").strip().upper()
+        aliases_tupla = parsear_aliases_estacion(datos.get("aliases"))
+        aliases_str = ", ".join(aliases_tupla)
+        activo = int(datos.get("activo", 1))
+        cod_raw = datos.get("codigo_origen")
+        try:
+            codigo_origen = int(cod_raw) if cod_raw not in (None, "", "-") else None
+        except (ValueError, TypeError):
+            codigo_origen = None
+
+        with self.db.write_transaction() as conn:
+            dup = conn.execute(
+                "SELECT id FROM estaciones WHERE LOWER(TRIM(nombre)) = LOWER(TRIM(?)) AND (? IS NULL OR id != ?)",
+                (nombre, estacion_id, estacion_id),
+            ).fetchone()
+            if dup:
+                raise ValueError(f"Ya existe una estación registrada con el nombre '{nombre}'.")
+
+            if estacion_id is None:
+                cur = conn.execute(
+                    """INSERT INTO estaciones (codigo_origen, nombre, sigla, aliases, activo, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime'), datetime('now', 'localtime'))""",
+                    (codigo_origen, nombre, sigla, aliases_str, activo),
+                )
+                eid = int(cur.lastrowid)
+                after = dict(conn.execute("SELECT * FROM estaciones WHERE id = ?", (eid,)).fetchone())
+                self._audit(conn, user_id, windows_user, "crear", "estacion", eid, None, after)
+                return eid
+
+            before = conn.execute("SELECT * FROM estaciones WHERE id = ?", (estacion_id,)).fetchone()
+            if not before:
+                raise ValueError("La estación indicada no existe.")
+            conn.execute(
+                """UPDATE estaciones
+                   SET codigo_origen = ?, nombre = ?, sigla = ?, aliases = ?, activo = ?,
+                       updated_at = datetime('now', 'localtime')
+                   WHERE id = ?""",
+                (codigo_origen, nombre, sigla, aliases_str, activo, estacion_id),
+            )
+            after = dict(conn.execute("SELECT * FROM estaciones WHERE id = ?", (estacion_id,)).fetchone())
+            self._audit(conn, user_id, windows_user, "modificar", "estacion", estacion_id, dict(before), after)
+            return int(estacion_id)
+
+    def cambiar_estado_estacion(
+        self,
+        estacion_id: int,
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> None:
+        """Activa o desactiva una estación del catálogo."""
+        with self.db.write_transaction() as conn:
+            before = conn.execute("SELECT * FROM estaciones WHERE id = ?", (estacion_id,)).fetchone()
+            if not before:
+                raise ValueError("La estación no existe.")
+            nuevo = 0 if int(before["activo"]) == 1 else 1
+            conn.execute(
+                "UPDATE estaciones SET activo = ?, updated_at = datetime('now', 'localtime') WHERE id = ?",
+                (nuevo, estacion_id),
+            )
+            after = dict(before)
+            after["activo"] = nuevo
+            self._audit(conn, user_id, windows_user, "cambiar_estado", "estacion", estacion_id, dict(before), after)
+
+    def importar_estaciones_excel(
+        self,
+        file_path: str,
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> Tuple[int, int]:
+        """Importa o actualiza el catálogo de estaciones y siglas desde Excel (ej. estaciones.xlsx)."""
+        import openpyxl
+
+        wb = openpyxl.load_workbook(file_path, data_only=True)
+        ws_sel = None
+        col_id = col_nom = col_sig = col_alias = None
+        hdr_row = 1
+
+        for ws in wb.worksheets:
+            for r in range(1, min(6, ws.max_row + 1)):
+                headers = [normalizar_texto_estacion(ws.cell(r, c).value) for c in range(1, ws.max_column + 1)]
+                c_n = next((i + 1 for i, h in enumerate(headers) if h in ("nombre", "estacion", "nombre estacion") or "nombre" in h), None)
+                c_s = next((i + 1 for i, h in enumerate(headers) if "sigla" in h or "abrev" in h), None)
+                if c_n and c_s:
+                    ws_sel = ws
+                    hdr_row = r
+                    col_nom = c_n
+                    col_sig = c_s
+                    col_id = next((i + 1 for i, h in enumerate(headers) if h in ("id", "codigo", "codigo origen", "nro")), None)
+                    col_alias = next((i + 1 for i, h in enumerate(headers) if "alias" in h or "equival" in h), None)
+                    break
+            if ws_sel is not None:
+                break
+
+        if ws_sel is None or not col_nom or not col_sig:
+            raise ValueError(
+                "El archivo Excel no contiene columnas válidas de estaciones ('Nombre' y 'Sigla')."
+            )
+
+        insertados = 0
+        actualizados = 0
+        with self.db.write_transaction() as conn:
+            existentes = [dict(r) for r in conn.execute("SELECT * FROM estaciones").fetchall()]
+            por_codigo = {int(r["codigo_origen"]): r for r in existentes if r.get("codigo_origen") is not None}
+            por_nombre_norm = {normalizar_texto_estacion(r["nombre"]): r for r in existentes}
+
+            for r in range(hdr_row + 1, ws_sel.max_row + 1):
+                nom_raw = str(ws_sel.cell(r, col_nom).value or "").strip()
+                sig_raw = str(ws_sel.cell(r, col_sig).value or "").strip().upper()
+                if not nom_raw:
+                    continue
+
+                cod_val = None
+                if col_id and ws_sel.cell(r, col_id).value is not None:
+                    try:
+                        cod_val = int(ws_sel.cell(r, col_id).value)
+                    except (ValueError, TypeError):
+                        cod_val = None
+
+                alias_excel = parsear_aliases_estacion(ws_sel.cell(r, col_alias).value if col_alias else "")
+                nom_norm = normalizar_texto_estacion(nom_raw)
+
+                prev = None
+                if cod_val is not None and cod_val in por_codigo:
+                    prev = por_codigo[cod_val]
+                elif nom_norm in por_nombre_norm:
+                    prev = por_nombre_norm[nom_norm]
+
+                if prev:
+                    aliases_prev = parsear_aliases_estacion(prev.get("aliases"))
+                    extras = [prev["nombre"]] if normalizar_texto_estacion(prev["nombre"]) != nom_norm else []
+                    aliases_merged = parsear_aliases_estacion([*aliases_prev, *alias_excel, *extras])
+                    aliases_str = ", ".join(aliases_merged)
+                    conn.execute(
+                        """UPDATE estaciones
+                           SET codigo_origen = COALESCE(?, codigo_origen),
+                               nombre = ?, sigla = ?, aliases = ?, activo = 1,
+                               updated_at = datetime('now', 'localtime')
+                           WHERE id = ?""",
+                        (cod_val, nom_raw, sig_raw, aliases_str, prev["id"]),
+                    )
+                    actualizados += 1
+                else:
+                    aliases_str = ", ".join(alias_excel)
+                    cur = conn.execute(
+                        """INSERT INTO estaciones (codigo_origen, nombre, sigla, aliases, activo, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, 1, datetime('now', 'localtime'), datetime('now', 'localtime'))""",
+                        (cod_val, nom_raw, sig_raw, aliases_str),
+                    )
+                    nuevo_row = {"id": cur.lastrowid, "codigo_origen": cod_val, "nombre": nom_raw, "sigla": sig_raw, "aliases": aliases_str}
+                    if cod_val is not None:
+                        por_codigo[cod_val] = nuevo_row
+                    por_nombre_norm[nom_norm] = nuevo_row
+                    insertados += 1
+
+            self._audit(
+                conn,
+                user_id,
+                windows_user,
+                "importar",
+                "estaciones",
+                None,
+                None,
+                {"insertados": insertados, "actualizados": actualizados, "archivo": Path(file_path).name},
+            )
+        return insertados, actualizados
+
+    # ---------------------------------------------------------
     # Estaciones Intermedias y Horarios de Paso por Tren (tren_paradas)
     # ---------------------------------------------------------
+
+    def listar_itinerarios_paradas(self) -> List[str]:
+        """Devuelve la unión ordenada de itinerarios existentes en tren_paradas y turnos_itinerario."""
+        with self.db.read_connection() as conn:
+            r1 = conn.execute(
+                "SELECT DISTINCT TRIM(itinerario) FROM tren_paradas WHERE TRIM(itinerario) != ''"
+            ).fetchall()
+            r2 = conn.execute(
+                "SELECT DISTINCT TRIM(itinerario_vigente) FROM turnos_itinerario WHERE activo = 1 AND TRIM(itinerario_vigente) != ''"
+            ).fetchall()
+        vals = {str(r[0]).strip() for r in (*r1, *r2) if r and str(r[0] or "").strip()}
+        return sorted(vals)
+
+    @staticmethod
+    def inferir_itinerario_desde_archivo(file_path: str) -> str:
+        """Extrae el código de itinerario (ej. 'H5', '45') del nombre de archivo si está presente."""
+        stem = Path(file_path).stem
+        m = re.search(r"itinerario[_\s\-]+([a-zA-Z]?\d+[a-zA-Z]?)", stem, re.IGNORECASE)
+        if m:
+            return m.group(1).upper()
+        return ""
+
+    @staticmethod
+    def _inferir_regimen_hoja(sheet_title: str, default_reg: str = "LV") -> str:
+        t = normalizar_texto_estacion(sheet_title)
+        if not t:
+            return default_reg
+        tokens = set(re.split(r"[\s_\-/]+", t))
+        if "sab" in t or "sabado" in tokens:
+            return "S"
+        if "dom" in t or "feriad" in t or "df" in tokens:
+            return "D"
+        if "hab" in t or "lun" in t or "lv" in tokens:
+            return "LV"
+        return default_reg
 
     def listar_paradas_tren(
         self,
         nro_tren: Optional[str] = None,
         itinerario: Optional[str] = None,
         estacion: Optional[str] = None,
-        limite: int = 1000,
+        regimen: Optional[str] = None,
+        limite: int = 5000,
     ) -> List[Dict[str, Any]]:
-        """Lista las estaciones intermedias y horarios de paso por tren."""
+        """Lista las estaciones intermedias y horarios de paso por tren con filtro por nombre o sigla."""
         query = """
             SELECT id, nro_tren, itinerario, regimen, orden_parada, estacion, hora_paso, created_at, updated_at
             FROM tren_paradas
@@ -3065,15 +3370,39 @@ class RecordsService:
         if itinerario and str(itinerario).strip() not in ("", "Todos", "Todas"):
             query += " AND itinerario = ?"
             params.append(str(itinerario).strip())
-        if estacion and str(estacion).strip():
-            query += " AND LOWER(estacion) LIKE ?"
-            params.append(f"%{str(estacion).strip().lower()}%")
-        query += " ORDER BY nro_tren ASC, orden_parada ASC, hora_paso ASC LIMIT ?"
-        params.append(limite)
+        if regimen and str(regimen).strip() not in ("", "Todos", "Todas"):
+            query += " AND UPPER(TRIM(regimen)) = UPPER(TRIM(?))"
+            params.append(str(regimen).strip())
+
+        query += """
+            ORDER BY
+                CASE WHEN TRIM(nro_tren) GLOB '[0-9]*' THEN CAST(TRIM(nro_tren) AS INTEGER) ELSE 999999999 END ASC,
+                nro_tren ASC,
+                itinerario ASC,
+                CASE UPPER(TRIM(regimen)) WHEN 'LV' THEN 1 WHEN 'S' THEN 2 WHEN 'D' THEN 3 ELSE 4 END ASC,
+                orden_parada ASC,
+                hora_paso ASC
+        """
+        est_filtro = str(estacion or "").strip()
+        if not est_filtro:
+            query += " LIMIT ?"
+            params.append(limite)
 
         with self.db.read_connection() as conn:
+            idx_est = self._obtener_indice_estaciones(conn)
             rows = conn.execute(query, params).fetchall()
-            return [dict(r) for r in rows]
+
+        resultado: List[Dict[str, Any]] = []
+        for r in rows:
+            item = dict(r)
+            est_txt = str(item.get("estacion") or "").strip()
+            if est_filtro and not idx_est.coincide_filtro_estacion(est_txt, est_filtro):
+                continue
+            item["sigla"] = idx_est.obtener_sigla_estacion(est_txt)
+            resultado.append(item)
+            if len(resultado) >= limite:
+                break
+        return resultado
 
     def crear_parada_tren(
         self,
@@ -3172,98 +3501,236 @@ class RecordsService:
         """Importa estaciones intermedias y horarios de paso por tren desde un archivo Excel.
 
         Soporta:
-        1) Libros con múltiples hojas (recorre todas las hojas del libro).
-        2) Planillas dedicadas con columnas estándar (TREN, ESTACION, HORA, ORDEN, ITINERARIO, REGIMEN).
-        3) Planillas de itinerarios estándar (con ORIGEN, HORA_SALIDA, DESTINO, HORA_LLEGADA por vuelta/fila).
-        4) Cuadros horarios matriciales (cabecera con múltiples columnas de trenes y fila/columna 1 con estaciones).
-        5) Importación simultánea de decenas o cientos de trenes en una sola operación.
+        1) Libros con múltiples hojas por ramal/régimen (ej. Hab ASC CÑ, Sab DES CÑ, DOM ASC CÑ).
+        2) Cuadros horarios matriciales SOFSE (columna KM + columna Estación/Tren + múltiples columnas numéricas de tren, excluyendo filas de pie como Formación, Locomotora, Sigue con y Sale) y matrices simples (Col 1=Estación, Col 2..N=Trenes).
+        3) Planillas dedicadas con columnas estándar (TREN, ESTACION, HORA, ORDEN, ITINERARIO, REGIMEN).
+        4) Planillas de itinerarios estándar (ORIGEN, HORA_SALIDA, DESTINO, HORA_LLEGADA por vuelta).
+        5) Importación masiva idempotente en lote con deduplicación por tren, itinerario, régimen, estación equivalente y hora.
         """
         import openpyxl
         from datetime import time as dt_time, datetime as dt_datetime
 
         def _parse_hr(val: Any) -> Optional[str]:
-            if val is None:
+            if val is None or isinstance(val, bool):
                 return None
             if isinstance(val, (dt_time, dt_datetime)):
                 return val.strftime("%H:%M")
+            if isinstance(val, (int, float)):
+                return None
             val_s = str(val).strip()
             if not val_s or val_s in ("None", "-", ".", "..", "--", "---"):
                 return None
-            if ":" in val_s:
-                parts = val_s.split(":")
-                try:
-                    h = int(parts[0])
-                    m = int(parts[1][:2])
+            m_hr = re.fullmatch(r"(\d{1,2}):(\d{2})(?::\d{2})?", val_s)
+            if m_hr:
+                h, m = int(m_hr.group(1)), int(m_hr.group(2))
+                if 0 <= h <= 23 and 0 <= m <= 59:
                     return f"{h:02d}:{m:02d}"
-                except Exception:
-                    return None
             return None
+
+        def _parse_tren_header(val: Any) -> Optional[str]:
+            if val is None or isinstance(val, bool):
+                return None
+            if isinstance(val, int):
+                return str(val)
+            if isinstance(val, float):
+                return str(int(val)) if val.is_integer() else None
+            val_s = str(val).strip()
+            if not val_s:
+                return None
+            cleaned = re.sub(r"^(?:TREN|NRO\.?|N[°º]\.?|#)\s*", "", val_s, flags=re.IGNORECASE).strip()
+            if re.fullmatch(r"\d+\.0+", cleaned):
+                cleaned = cleaned.split(".", 1)[0]
+            return cleaned if cleaned.isdigit() else None
+
+        FOOTER_ROW_KEYS = {
+            "estacion",
+            "tipo",
+            "tren",
+            "trenes",
+            "tren n",
+            "tren nº",
+            "tren nro",
+            "kilometro",
+            "kilometros",
+            "km",
+            "formacion",
+            "locomotora",
+            "sigue con",
+            "vuelve con",
+            "sale",
+            "hora salida",
+            "observaciones",
+            "total",
+            "desde",
+            "hasta",
+        }
+
+        itin_archivo = self.inferir_itinerario_desde_archivo(file_path)
+        itin_fallback_base = str(itinerario_default).strip() if itinerario_default and str(itinerario_default).strip() else itin_archivo
 
         wb = openpyxl.load_workbook(file_path, data_only=True)
         registros_a_insertar: List[Tuple[str, str, str, int, str, str]] = []
-        orden_tracker: Dict[Tuple[str, str], int] = {}
+        orden_tracker: Dict[Tuple[str, str, str], int] = {}
+        vio_catalogo_estaciones = False
 
         for ws in wb.worksheets:
             if ws.max_row < 2:
                 continue
 
-            headers_raw = [str(ws.cell(1, c).value or "").strip().upper() for c in range(1, ws.max_column + 1)]
-            col_map: Dict[str, int] = {h: idx + 1 for idx, h in enumerate(headers_raw) if h}
+            # Detectar si la hoja corresponde únicamente a un catálogo de estaciones (Id, Nombre, Sigla)
+            first_rows_headers = [
+                {normalizar_texto_estacion(ws.cell(r, c).value) for c in range(1, ws.max_column + 1)}
+                for r in range(1, min(4, ws.max_row + 1))
+            ]
+            has_cat_cols = any(
+                ("nombre" in hs or "estacion" in hs) and any("sigla" in h or "abrev" in h for h in hs)
+                for hs in first_rows_headers
+            )
 
-            def _find_col(*candidates: str) -> Optional[int]:
-                for cand in candidates:
-                    for h_name, c_idx in col_map.items():
-                        if cand in h_name:
-                            return c_idx
-                return None
+            # Buscar la fila cabecera dentro de las primeras 10 filas
+            best_hdr = None
+            max_r_scan = min(10, ws.max_row)
+            for r in range(1, max_r_scan + 1):
+                headers_raw = [str(ws.cell(r, c).value or "").strip().upper() for c in range(1, ws.max_column + 1)]
+                col_map: Dict[str, int] = {}
+                for idx_c, h in enumerate(headers_raw):
+                    if h and h not in col_map:
+                        col_map[h] = idx_c + 1
 
-            c_tren = _find_col("NRO_TREN", "TREN", "N° TREN")
-            c_est = _find_col("ESTACION", "ESTACIÓN", "PARADA")
-            c_hora = _find_col("HORA_PASO", "HORA", "PASO", "HORARIO")
-            c_orden = _find_col("ORDEN", "SECUENCIA")
-            c_itin = _find_col("ITINERARIO", "CIRC", "VIGENCIA")
-            c_reg = _find_col("REGIMEN", "RÉGIMEN", "DIA", "TIPO")
+                def _find_col(*candidates: str) -> Optional[int]:
+                    for cand in candidates:
+                        for h_name, c_idx in col_map.items():
+                            if cand in h_name:
+                                return c_idx
+                    return None
 
-            c_origen = _find_col("ORIGEN", "DESDE", "SALE DE")
-            c_h_sal = _find_col("SALIDA", "H_SALIDA", "HORA_SALIDA")
-            c_destino = _find_col("DESTINO", "HASTA", "LLEGA A")
-            c_h_lleg = _find_col("LLEGADA", "H_LLEGADA", "HORA_LLEGADA")
+                c_tren = _find_col("NRO_TREN", "TREN", "N° TREN")
+                c_est = _find_col("ESTACION", "ESTACIÓN", "PARADA")
+                c_hora = _find_col("HORA_PASO", "HORA", "PASO", "HORARIO")
+                c_orden = _find_col("ORDEN", "SECUENCIA")
+                c_itin = _find_col("ITINERARIO", "CIRC", "VIGENCIA")
+                c_reg = next(
+                    (
+                        c_idx
+                        for h_name, c_idx in col_map.items()
+                        if "REGIMEN" in h_name or "RÉGIMEN" in h_name or h_name in ("DIA", "DÍA", "SERVICIO")
+                    ),
+                    None,
+                )
+                c_origen = _find_col("ORIGEN", "DESDE", "SALE DE")
+                c_h_sal = _find_col("SALIDA", "H_SALIDA", "HORA_SALIDA")
+                c_destino = _find_col("DESTINO", "HASTA", "LLEGA A")
+                c_h_lleg = _find_col("LLEGADA", "H_LLEGADA", "HORA_LLEGADA")
 
-            # Detectar formato matricial de cuadro horario (Cabecera con múltiples columnas numéricas de tren)
-            matrix_tren_cols: List[Tuple[int, str]] = []
-            if not c_tren or (not c_hora and not c_h_sal):
-                for c in range(2, ws.max_column + 1):
-                    val_h = str(ws.cell(1, c).value or "").strip()
-                    val_clean = val_h.upper().replace("TREN", "").replace("N°", "").replace("#", "").strip()
-                    if val_clean.isdigit():
-                        matrix_tren_cols.append((c, val_clean))
+                matrix_tren_cols: List[Tuple[int, str]] = []
+                if not c_hora and not c_h_sal:
+                    for c in range(2, ws.max_column + 1):
+                        nt_col = _parse_tren_header(ws.cell(r, c).value)
+                        if nt_col:
+                            matrix_tren_cols.append((c, nt_col))
 
-            if len(matrix_tren_cols) >= 2:
-                # Es un cuadro horario matricial: Columna 1 = Estación, Columnas 2..N = Trenes
-                for r_idx in range(2, ws.max_row + 1):
-                    est_val = str(ws.cell(r_idx, 1).value or "").strip()
-                    if not est_val or est_val.upper() in ("ESTACION", "ESTACIÓN", "TREN", "OBSERVACIONES", "TOTAL"):
+                if len(matrix_tren_cols) >= 2:
+                    best_hdr = (r, "matrix", matrix_tren_cols, c_tren, c_est, c_hora, c_orden, c_itin, c_reg, c_origen, c_h_sal, c_destino, c_h_lleg)
+                    break
+                if len(matrix_tren_cols) == 1 and not c_est and (c_tren or any(_parse_hr(ws.cell(rr, matrix_tren_cols[0][0]).value) for rr in range(r + 1, min(ws.max_row + 1, r + 40)))):
+                    best_hdr = (r, "matrix", matrix_tren_cols, c_tren, c_est, c_hora, c_orden, c_itin, c_reg, c_origen, c_h_sal, c_destino, c_h_lleg)
+                    break
+                if c_tren and c_est and c_hora:
+                    best_hdr = (r, "columnar", [], c_tren, c_est, c_hora, c_orden, c_itin, c_reg, c_origen, c_h_sal, c_destino, c_h_lleg)
+                    break
+                if c_tren and c_origen and c_h_sal and c_destino and c_h_lleg:
+                    best_hdr = (r, "vueltas", [], c_tren, c_est, c_hora, c_orden, c_itin, c_reg, c_origen, c_h_sal, c_destino, c_h_lleg)
+                    break
+
+            if has_cat_cols and (best_hdr is None):
+                vio_catalogo_estaciones = True
+                continue
+
+            sheet_reg_default = self._inferir_regimen_hoja(ws.title, default_reg="LV")
+            sheet_itin_default = itin_fallback_base or str(ws.title or "").strip()
+
+            if best_hdr and best_hdr[1] == "matrix":
+                hdr_row, _, matrix_tren_cols, _, c_est, _, _, _, _, _, _, _, _ = best_hdr
+                first_tren_col = min(c for c, _ in matrix_tren_cols)
+
+                # Detectar automáticamente la columna que contiene los nombres de estación
+                if first_tren_col <= 2:
+                    col_estacion = 1
+                elif c_est and c_est < first_tren_col:
+                    col_estacion = c_est
+                else:
+                    best_col = first_tren_col - 1
+                    best_score = -1
+                    for cand_c in range(1, first_tren_col):
+                        score = 0
+                        for rr in range(hdr_row + 1, min(ws.max_row + 1, hdr_row + 60)):
+                            v = ws.cell(rr, cand_c).value
+                            if isinstance(v, str):
+                                s_clean = re.sub(r"\s+", " ", v).strip()
+                                s_norm = normalizar_texto_estacion(s_clean)
+                                if (
+                                    len(s_clean) >= 3
+                                    and s_norm not in FOOTER_ROW_KEYS
+                                    and s_norm != "pc"
+                                    and not re.fullmatch(r"[\d.,\-]+", s_clean)
+                                ):
+                                    score += 1
+                        if score > best_score:
+                            best_score = score
+                            best_col = cand_c
+                    col_estacion = best_col
+
+                for r_idx in range(hdr_row + 1, ws.max_row + 1):
+                    raw_est = ws.cell(r_idx, col_estacion).value
+                    if raw_est is None or isinstance(raw_est, (int, float, dt_time, dt_datetime)):
                         continue
+                    est_val = re.sub(r"\s+", " ", str(raw_est)).strip()
+                    if not est_val:
+                        continue
+                    est_norm = normalizar_texto_estacion(est_val)
+                    est_comp = _clave_compacta_estacion(est_val, quitar_parentesis=False)
+                    if (
+                        est_norm in FOOTER_ROW_KEYS
+                        or est_comp in FOOTER_ROW_KEYS
+                        or est_norm.startswith("formacion")
+                        or est_norm.startswith("locomotora")
+                        or est_norm.startswith("sigue con")
+                        or est_norm.startswith("tren n")
+                        or re.fullmatch(r"[\d.,\-]+", est_val)
+                    ):
+                        continue
+
                     for c_idx, nt in matrix_tren_cols:
                         hr = _parse_hr(ws.cell(r_idx, c_idx).value)
                         if hr:
-                            itin = str(itinerario_default or ws.title or "").strip()
-                            ord_key = (nt, itin)
+                            ord_key = (nt, sheet_itin_default, sheet_reg_default)
                             orden_tracker[ord_key] = orden_tracker.get(ord_key, 0) + 1
-                            registros_a_insertar.append((nt, itin, "LV", orden_tracker[ord_key], est_val, hr))
+                            registros_a_insertar.append(
+                                (nt, sheet_itin_default, sheet_reg_default, orden_tracker[ord_key], est_val, hr)
+                            )
                 continue
 
-            # Formatos columnares estándar por fila
-            for r_idx in range(2, ws.max_row + 1):
-                if c_tren and c_est and c_hora:
+            if best_hdr:
+                hdr_row, mode, _, c_tren, c_est, c_hora, c_orden, c_itin, c_reg, c_origen, c_h_sal, c_destino, c_h_lleg = best_hdr
+            else:
+                hdr_row, mode = 1, "positional"
+                c_tren = c_est = c_hora = c_orden = c_itin = c_reg = None
+                c_origen = c_h_sal = c_destino = c_h_lleg = None
+
+            for r_idx in range(hdr_row + 1, ws.max_row + 1):
+                if mode == "columnar" and c_tren and c_est and c_hora:
                     nt = str(ws.cell(r_idx, c_tren).value or "").strip()
-                    est = str(ws.cell(r_idx, c_est).value or "").strip()
+                    if nt.endswith(".0") and nt[:-2].isdigit():
+                        nt = nt[:-2]
+                    est = re.sub(r"\s+", " ", str(ws.cell(r_idx, c_est).value or "")).strip()
                     hr = _parse_hr(ws.cell(r_idx, c_hora).value)
                     if not nt or not est or not hr or nt in ("None", "-"):
                         continue
-                    itin = str(ws.cell(r_idx, c_itin).value or itinerario_default or ws.title or "").strip() if c_itin else (itinerario_default or ws.title or "")
-                    reg = str(ws.cell(r_idx, c_reg).value or "LV").strip() if c_reg else "LV"
-                    ord_key = (nt, itin)
+                    cell_itin = str(ws.cell(r_idx, c_itin).value or "").strip() if c_itin else ""
+                    itin = cell_itin or sheet_itin_default
+                    cell_reg = str(ws.cell(r_idx, c_reg).value or "").strip() if c_reg else ""
+                    reg = cell_reg or sheet_reg_default
+                    ord_key = (nt, itin, reg)
                     if c_orden and ws.cell(r_idx, c_orden).value is not None:
                         try:
                             ord_num = int(ws.cell(r_idx, c_orden).value)
@@ -3274,103 +3741,254 @@ class RecordsService:
                         orden_tracker[ord_key] = orden_tracker.get(ord_key, 0) + 1
                         ord_num = orden_tracker[ord_key]
                     registros_a_insertar.append((nt, itin, reg, ord_num, est, hr))
-                elif c_tren and c_origen and c_h_sal and c_destino and c_h_lleg:
+                elif mode == "vueltas" and c_tren and c_origen and c_h_sal and c_destino and c_h_lleg:
                     nt = str(ws.cell(r_idx, c_tren).value or "").strip()
                     if not nt or nt in ("None", "-"):
                         continue
-                    itin = str(ws.cell(r_idx, c_itin).value or itinerario_default or ws.title or "").strip() if c_itin else (itinerario_default or ws.title or "")
-                    reg = str(ws.cell(r_idx, c_reg).value or "LV").strip() if c_reg else "LV"
-                    orig = str(ws.cell(r_idx, c_origen).value or "").strip()
+                    cell_itin = str(ws.cell(r_idx, c_itin).value or "").strip() if c_itin else ""
+                    itin = cell_itin or sheet_itin_default
+                    cell_reg = str(ws.cell(r_idx, c_reg).value or "").strip() if c_reg else ""
+                    reg = cell_reg or sheet_reg_default
+                    orig = re.sub(r"\s+", " ", str(ws.cell(r_idx, c_origen).value or "")).strip()
                     hs = _parse_hr(ws.cell(r_idx, c_h_sal).value)
-                    dest = str(ws.cell(r_idx, c_destino).value or "").strip()
+                    dest = re.sub(r"\s+", " ", str(ws.cell(r_idx, c_destino).value or "")).strip()
                     hl = _parse_hr(ws.cell(r_idx, c_h_lleg).value)
-                    ord_key = (nt, itin)
+                    ord_key = (nt, itin, reg)
                     for est, hr in ((orig, hs), (dest, hl)):
                         if est and hr:
                             orden_tracker[ord_key] = orden_tracker.get(ord_key, 0) + 1
                             registros_a_insertar.append((nt, itin, reg, orden_tracker[ord_key], est, hr))
                 else:
                     # Fallback posicional: col 1=Tren, col 2=Estacion, col 3=Hora, col 4=Orden, col 5=Itinerario
-                    nt = str(ws.cell(r_idx, 1).value or "").strip()
-                    est = str(ws.cell(r_idx, 2).value or "").strip()
-                    hr = _parse_hr(ws.cell(r_idx, 3).value)
-                    if not nt or not est or not hr or nt in ("None", "-"):
+                    raw_nt = ws.cell(r_idx, 1).value
+                    if isinstance(raw_nt, float) and not raw_nt.is_integer():
                         continue
-                    itin = str(ws.cell(r_idx, 5).value or itinerario_default or ws.title or "").strip()
-                    ord_key = (nt, itin)
+                    nt = str(raw_nt or "").strip()
+                    if nt.endswith(".0") and nt[:-2].isdigit():
+                        nt = nt[:-2]
+                    est = re.sub(r"\s+", " ", str(ws.cell(r_idx, 2).value or "")).strip()
+                    hr = _parse_hr(ws.cell(r_idx, 3).value)
+                    if (
+                        not nt
+                        or not est
+                        or not hr
+                        or nt in ("None", "-")
+                        or normalizar_texto_estacion(est) in FOOTER_ROW_KEYS
+                        or re.fullmatch(r"\d+[.,]\d+", nt)
+                    ):
+                        continue
+                    itin = str(ws.cell(r_idx, 5).value or "").strip() if ws.max_column >= 5 else ""
+                    itin = itin or sheet_itin_default
+                    ord_key = (nt, itin, sheet_reg_default)
                     orden_tracker[ord_key] = orden_tracker.get(ord_key, 0) + 1
-                    registros_a_insertar.append((nt, itin, "LV", orden_tracker[ord_key], est, hr))
+                    registros_a_insertar.append((nt, itin, sheet_reg_default, orden_tracker[ord_key], est, hr))
 
-        insertados = 0
+        if not registros_a_insertar and vio_catalogo_estaciones:
+            raise ValueError(
+                "El archivo seleccionado corresponde a un catálogo de estaciones (columnas Nombre/Sigla) y no a horarios de trenes.\n"
+                "Utilice el botón '🏷️ Estaciones / Abrev.' para importar el catálogo de estaciones y abreviaturas."
+            )
+
+        to_insert: List[Tuple[str, str, str, int, str, str]] = []
         with self.db.write_transaction() as conn:
+            idx_est = self._obtener_indice_estaciones(conn)
+            existentes: Dict[Tuple[str, str, str, str], List[str]] = {}
+            for r in conn.execute(
+                "SELECT nro_tren, itinerario, regimen, estacion, hora_paso FROM tren_paradas"
+            ).fetchall():
+                k = (
+                    str(r["nro_tren"] or "").strip(),
+                    str(r["itinerario"] or "").strip().upper(),
+                    str(r["regimen"] or "LV").strip().upper(),
+                    str(r["hora_paso"] or "").strip(),
+                )
+                existentes.setdefault(k, []).append(str(r["estacion"] or "").strip())
+
             for nt, itin, reg, ord_num, est, hr in registros_a_insertar:
-                existe = conn.execute(
-                    "SELECT id FROM tren_paradas WHERE nro_tren=? AND itinerario=? AND UPPER(estacion)=UPPER(?) AND hora_paso=?",
-                    (nt, itin, est, hr),
-                ).fetchone()
-                if not existe:
-                    conn.execute(
-                        """INSERT INTO tren_paradas (nro_tren, itinerario, regimen, orden_parada, estacion, hora_paso, sync_status, created_at, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now', 'localtime'), datetime('now', 'localtime'))""",
-                        (nt, itin, reg, ord_num, est, hr),
-                    )
-                    insertados += 1
-            self._audit(conn, user_id, windows_user, "importar", "tren_paradas", None, None, {"insertados": insertados})
+                k = (nt, itin.upper(), reg.upper(), hr)
+                ests_existentes = existentes.get(k, [])
+                if any(e.upper() == est.upper() or idx_est.estaciones_equivalentes(e, est) for e in ests_existentes):
+                    continue
+                existentes.setdefault(k, []).append(est)
+                to_insert.append((nt, itin, reg, ord_num, est, hr))
+
+            if to_insert:
+                conn.executemany(
+                    """INSERT INTO tren_paradas (nro_tren, itinerario, regimen, orden_parada, estacion, hora_paso, sync_status, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now', 'localtime'), datetime('now', 'localtime'))""",
+                    to_insert,
+                )
+
+            insertados = len(to_insert)
+            self._audit(
+                conn,
+                user_id,
+                windows_user,
+                "importar",
+                "tren_paradas",
+                None,
+                None,
+                {"insertados": insertados, "archivo": Path(file_path).name},
+            )
         return insertados
 
     def obtener_estaciones_y_horarios_por_tren(
         self,
         nro_tren: str,
         itinerario: Optional[str] = None,
+        regimen: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         """Obtiene la secuencia de estaciones y horarios de paso para un N° de tren dado.
 
-        Combina registros de `tren_paradas` y tramos de `turnos_vueltas` para garantizar cobertura total.
+        Combina registros de `tren_paradas` y tramos de `turnos_vueltas` evitando duplicados
+        entre nombres completos y abreviaturas, respetando el régimen y el orden de marcha
+        (incluso en servicios que cruzan la medianoche).
         """
         nt = str(nro_tren or "").strip()
         if not nt:
             return []
 
-        vistas: Dict[str, str] = {}
+        itin_clean = str(itinerario or "").strip()
+        filtrar_itin = bool(itin_clean and itin_clean not in ("Todos", "Todas"))
+        reg_clean = str(regimen or "").strip().upper()
+        filtrar_reg = bool(reg_clean and reg_clean not in ("TODOS", "TODAS"))
+
+        def _min_of_day(hhmm: str) -> Optional[int]:
+            parts = str(hhmm or "").strip().split(":")
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                h, m = int(parts[0]), int(parts[1])
+                if 0 <= h <= 23 and 0 <= m <= 59:
+                    return h * 60 + m
+            return None
+
         resultado: List[Dict[str, str]] = []
+        offsets_resultado: List[Optional[int]] = []
 
         with self.db.read_connection() as conn:
-            q_paradas = "SELECT estacion, hora_paso, orden_parada FROM tren_paradas WHERE nro_tren = ?"
-            p_paradas: List[Any] = [nt]
-            if itinerario and str(itinerario).strip() not in ("", "Todos", "Todas"):
-                q_paradas += " AND (itinerario = ? OR itinerario = '')"
-                p_paradas.append(str(itinerario).strip())
-            q_paradas += " ORDER BY orden_parada ASC, hora_paso ASC"
+            idx_est = self._obtener_indice_estaciones(conn)
 
-            for r in conn.execute(q_paradas, p_paradas).fetchall():
-                est = str(r["estacion"] or "").strip()
-                hr = str(r["hora_paso"] or "").strip()
-                if est and est.upper() not in vistas:
-                    vistas[est.upper()] = hr
-                    resultado.append({"estacion": est, "hora": hr})
+            paradas_all = [
+                dict(r)
+                for r in conn.execute(
+                    """SELECT estacion, hora_paso, orden_parada, itinerario, regimen
+                       FROM tren_paradas
+                       WHERE nro_tren = ?
+                       ORDER BY orden_parada ASC, id ASC""",
+                    (nt,),
+                ).fetchall()
+            ]
+
+            paradas_sub = paradas_all
+            if filtrar_itin:
+                coinciden_itin = [
+                    r for r in paradas_all if str(r.get("itinerario") or "").strip() in (itin_clean, "")
+                ]
+                if coinciden_itin:
+                    paradas_sub = coinciden_itin
+
+            if paradas_sub:
+                regimenes_presentes = [str(r.get("regimen") or "LV").strip().upper() for r in paradas_sub]
+                if filtrar_reg and reg_clean in regimenes_presentes:
+                    reg_elegido = reg_clean
+                else:
+                    for prio in ("LV", "S", "D"):
+                        if prio in regimenes_presentes:
+                            reg_elegido = prio
+                            break
+                    else:
+                        reg_elegido = regimenes_presentes[0]
+
+                paradas_sub = [
+                    r for r in paradas_sub if str(r.get("regimen") or "LV").strip().upper() == reg_elegido
+                ]
+
+            ref_min: Optional[int] = None
+            prev_abs_min: Optional[int] = None
+            wrap_days = 0
+            for r in paradas_sub:
+                est = str(r.get("estacion") or "").strip()
+                hr = str(r.get("hora_paso") or "").strip()
+                if not est:
+                    continue
+                if any(idx_est.estaciones_equivalentes(it["estacion"], est) or it["estacion"].upper() == est.upper() for it in resultado):
+                    continue
+                mod = _min_of_day(hr)
+                off: Optional[int] = None
+                if mod is not None:
+                    if ref_min is None:
+                        ref_min = mod
+                        prev_abs_min = mod
+                        off = 0
+                    else:
+                        cand_abs = mod + wrap_days * 1440
+                        if prev_abs_min is not None and cand_abs + 60 < prev_abs_min:
+                            wrap_days += 1
+                            cand_abs = mod + wrap_days * 1440
+                        prev_abs_min = cand_abs
+                        off = cand_abs - ref_min
+                resultado.append({"estacion": est, "hora": hr})
+                offsets_resultado.append(off)
 
             # Complementar con turnos_vueltas
             q_vueltas = """
-                SELECT v.origen, v.hora_salida, v.destino, v.hora_llegada
+                SELECT v.origen, v.hora_salida, v.destino, v.hora_llegada, t.itinerario_vigente
                 FROM turnos_vueltas v
                 JOIN turnos_itinerario t ON t.id = v.turno_id
                 WHERE v.nro_tren = ?
+                ORDER BY v.hora_salida ASC
             """
-            p_vueltas: List[Any] = [nt]
-            if itinerario and str(itinerario).strip() not in ("", "Todos", "Todas"):
-                q_vueltas += " AND t.itinerario_vigente = ?"
-                p_vueltas.append(str(itinerario).strip())
-            q_vueltas += " ORDER BY v.hora_salida ASC"
+            vueltas_rows = [dict(r) for r in conn.execute(q_vueltas, (nt,)).fetchall()]
+            if filtrar_itin:
+                vueltas_itin = [
+                    r for r in vueltas_rows if str(r.get("itinerario_vigente") or "").strip() == itin_clean
+                ]
+                if vueltas_itin or not resultado:
+                    vueltas_rows = vueltas_itin
 
-            for r in conn.execute(q_vueltas, p_vueltas).fetchall():
-                for est_raw, hr_raw in ((r["origen"], r["hora_salida"]), (r["destino"], r["hora_llegada"])):
+            desde_vueltas_solo = len(resultado) == 0
+            for r in vueltas_rows:
+                for est_raw, hr_raw in ((r.get("origen"), r.get("hora_salida")), (r.get("destino"), r.get("hora_llegada"))):
                     est = str(est_raw or "").strip()
                     hr = str(hr_raw or "").strip()
-                    if est and est.upper() not in vistas:
-                        vistas[est.upper()] = hr
-                        resultado.append({"estacion": est, "hora": hr})
+                    if not est:
+                        continue
+                    if any(
+                        idx_est.estaciones_equivalentes(it["estacion"], est) or it["estacion"].upper() == est.upper()
+                        for it in resultado
+                    ):
+                        continue
+                    nuevo_item = {"estacion": est, "hora": hr}
+                    if not desde_vueltas_solo and ref_min is not None:
+                        mod_v = _min_of_day(hr)
+                        if mod_v is not None:
+                            delta = (mod_v - ref_min) % 1440
+                            if delta >= 720:
+                                delta -= 1440
+                            ins_pos = len(resultado)
+                            for idx_p, off_p in enumerate(offsets_resultado):
+                                if off_p is not None and delta < off_p:
+                                    ins_pos = idx_p
+                                    break
+                            resultado.insert(ins_pos, nuevo_item)
+                            offsets_resultado.insert(ins_pos, delta)
+                            continue
+                    resultado.append(nuevo_item)
+                    offsets_resultado.append(None)
 
-        resultado.sort(key=lambda x: x.get("hora") or "99:99")
+        if desde_vueltas_solo and resultado:
+            mins = [m for m in (_min_of_day(x.get("hora", "")) for x in resultado) if m is not None]
+            cruza_medianoche = bool(mins) and any(m >= 20 * 60 for m in mins) and any(m <= 4 * 60 for m in mins)
+
+            def _vuelta_sort_key(item: Dict[str, str]):
+                hr_s = item.get("hora") or "99:99"
+                m = _min_of_day(hr_s)
+                if m is None:
+                    return (99999, hr_s)
+                if cruza_medianoche and m <= 4 * 60:
+                    return (m + 1440, hr_s)
+                return (m, hr_s)
+
+            resultado.sort(key=_vuelta_sort_key)
         return resultado
 
     # ---------------------------------------------------------
