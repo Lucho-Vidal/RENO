@@ -3,7 +3,6 @@
 from typing import Any, Dict
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -16,9 +15,10 @@ from PySide6.QtWidgets import (
 
 from src.core.theme import obtener_tema_visual
 from src.services.auth_service import AuthService
+from src.ui.views.dialogs.base_dialog import BaseDialog
 
 
-class CambiarMiPasswordDialog(QDialog):
+class CambiarMiPasswordDialog(BaseDialog):
     """Permite al usuario cambiar su propia contraseña ingresando la actual y la nueva."""
 
     def __init__(self, auth_service: AuthService, usuario_actual: Dict[str, Any], parent=None):
@@ -28,7 +28,6 @@ class CambiarMiPasswordDialog(QDialog):
 
         self.setWindowTitle("Cambiar mi Contraseña")
         self.setMinimumWidth(420)
-        self.setWindowFlags((self.windowFlags() & ~Qt.WindowContextHelpButtonHint) | Qt.WindowCloseButtonHint)
         self._init_ui()
         self.adjustSize()
 

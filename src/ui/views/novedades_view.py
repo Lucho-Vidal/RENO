@@ -7,7 +7,6 @@ from PySide6.QtCore import QDate, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
-    QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -30,12 +29,13 @@ from src.services.pdf_service import PDFService
 from src.services.records_service import RecordsService
 from src.ui.models.base_table_model import BaseTableModel
 from src.ui.models.multi_filter_proxy import MultiFilterProxyModel
+from src.ui.views.dialogs.base_dialog import BaseDialog
 from src.ui.views.dialogs.novedad_dialog import NovedadDialog
 
 logger = get_logger("NovedadesView")
 
 
-class TurnosSinCubrirDialog(QDialog):
+class TurnosSinCubrirDialog(BaseDialog):
     """Diálogo modal para consultar y exportar turnos sin cubrir en una fecha dada."""
 
     def __init__(

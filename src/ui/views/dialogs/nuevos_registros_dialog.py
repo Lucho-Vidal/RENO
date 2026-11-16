@@ -3,7 +3,6 @@
 from typing import Any, Callable, Dict, List, Optional
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -14,8 +13,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from src.ui.views.dialogs.base_dialog import BaseDialog
 
-class NuevosRegistrosDialog(QDialog):
+
+class NuevosRegistrosDialog(BaseDialog):
     """Muestra los nuevos registros operativos cargados desde el último acceso.
     
     Permite filtrar por texto, seleccionar cualquier novedad o cambio de turno y
@@ -41,7 +42,6 @@ class NuevosRegistrosDialog(QDialog):
         total = len(novedades) + len(cambios)
         self.setWindowTitle(f"🔔 Registros Nuevos Operativos ({total})")
         self.resize(880, 520)
-        self.setWindowFlags((self.windowFlags() & ~Qt.WindowContextHelpButtonHint) | Qt.WindowCloseButtonHint)
 
         self._registros_planos: List[Dict[str, Any]] = []
         self._init_ui()

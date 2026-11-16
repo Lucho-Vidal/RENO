@@ -5,7 +5,6 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -20,25 +19,10 @@ from PySide6.QtWidgets import (
 from src.core.logger import get_logger
 from src.services.records_service import RecordsService
 from src.ui.models.base_table_model import BaseTableModel
+from src.ui.views.dialogs.base_dialog import BaseMaximizedDialog
 from src.ui.views.dialogs.turno_dialog import TurnoDialog
 
 logger = get_logger("AdminTurnos")
-
-
-class BaseMaximizedDialog(QDialog):
-    """Clase base para diálogos maximizados con botón de cierre funcional."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowFlags(Qt.Window | Qt.WindowTitleHint | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint)
-
-    def closeEvent(self, event) -> None:
-        self.reject()
-        event.accept()
-
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        self.showMaximized()
 
 
 class AdminTurnosWidget(QWidget):

@@ -9,7 +9,6 @@ from PySide6.QtCore import QDate, QTime, Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
-    QDialog,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -32,10 +31,11 @@ from src.domain.validators import parsear_fecha
 from src.services.pdf_service import PDFService
 from src.services.records_service import RecordsService
 from src.ui.views.dialogs.admin_tren_paradas_dialog import AdminTrenParadasDialog
+from src.ui.views.dialogs.base_dialog import BaseMaximizedDialog
 from src.ui.views.dialogs.legajo_search_dialog import LegajoSearchDialog
 
 
-class OrdenamientoDialog(QDialog):
+class OrdenamientoDialog(BaseMaximizedDialog):
     """Formulario modal maximizado para crear o editar un Ordenamiento Operativo (Orden de Servicio)."""
 
     def __init__(
@@ -64,11 +64,6 @@ class OrdenamientoDialog(QDialog):
             else "Nuevo Ordenamiento Operativo (Orden de Servicio)"
         )
         self.resize(1120, 740)
-        self.setWindowFlags(
-            (self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-            | Qt.WindowMinMaxButtonsHint
-            | Qt.WindowCloseButtonHint
-        )
 
         self._empleados_cache = self.records_service.listar_empleados(incluir_inactivos=False)
         self._personal_estacion_cache = self.records_service.listar_personal_estacion(incluir_inactivos=False)
@@ -79,10 +74,6 @@ class OrdenamientoDialog(QDialog):
             self._cargar_datos_existentes()
         else:
             self._actualizar_nro_orden_y_refs("PC")
-
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        self.showMaximized()
 
     def _init_ui(self) -> None:
         main_layout = QVBoxLayout(self)
@@ -389,6 +380,8 @@ class OrdenamientoDialog(QDialog):
                 self._cargar_empleado(emp)
 
     def _on_legajo_changed(self) -> None:
+        if getattr(self, "_cerrando", False):
+            return
         val = self.txt_legajo.text().strip()
         if not val:
             return

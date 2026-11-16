@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Optional
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
-    QDialog,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -28,9 +27,10 @@ from PySide6.QtWidgets import (
 
 from src.core.config import obtener_usuario_windows
 from src.services.records_service import RecordsService
+from src.ui.views.dialogs.base_dialog import BaseMaximizedDialog
 
 
-class AdminTrenParadasDialog(QDialog):
+class AdminTrenParadasDialog(BaseMaximizedDialog):
     """Administración CRUD e importación desde Excel de estaciones intermedias por tren (`tren_paradas`)."""
 
     def __init__(
@@ -48,18 +48,9 @@ class AdminTrenParadasDialog(QDialog):
 
         self.setWindowTitle("Gestión de Estaciones Intermedias y Horarios de Paso por Tren")
         self.resize(1100, 680)
-        self.setWindowFlags(
-            (self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-            | Qt.WindowMinMaxButtonsHint
-            | Qt.WindowCloseButtonHint
-        )
 
         self._init_ui(tren_inicial)
         self.refrescar_tabla()
-
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        self.showMaximized()
 
     def _init_ui(self, tren_inicial: str) -> None:
         layout = QVBoxLayout(self)

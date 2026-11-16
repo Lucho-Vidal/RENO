@@ -167,3 +167,8 @@ class AdministracionView(QWidget):
         """Propaga el cambio de tema a los submódulos de administración."""
         if hasattr(self, "widget_roles") and hasattr(self.widget_roles, "actualizar_tema"):
             self.widget_roles.actualizar_tema(tema)
+
+    def cerrar_limpiamente(self) -> None:
+        """Detiene hilos en segundo plano de las subpestañas antes de cerrar la ventana."""
+        if hasattr(self, "widget_config") and hasattr(self.widget_config, "cerrar_limpiamente"):
+            self.widget_config.cerrar_limpiamente()

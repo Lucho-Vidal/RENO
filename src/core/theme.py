@@ -10,7 +10,7 @@ from typing import Any
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPixmap
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 from .config import (
     CONFIG_JSON_PATH,
@@ -27,6 +27,27 @@ TEMA_CLARO = "claro"
 TEMA_OSCURO = "oscuro"
 
 _TEMA_ACTUAL: str | None = None
+
+DIALOG_STANDARD_FLAGS = (
+    Qt.Window
+    | Qt.WindowTitleHint
+    | Qt.WindowSystemMenuHint
+    | Qt.WindowCloseButtonHint
+)
+DIALOG_MAXIMIZED_FLAGS = (
+    Qt.Window
+    | Qt.WindowTitleHint
+    | Qt.WindowSystemMenuHint
+    | Qt.WindowMinMaxButtonsHint
+    | Qt.WindowCloseButtonHint
+)
+DIALOG_LOCKED_FLAGS = (
+    Qt.Window
+    | Qt.CustomizeWindowHint
+    | Qt.WindowTitleHint
+)
+
+_WORKERS_DESVINCULADOS: set[Any] = set()
 
 
 def obtener_tema_visual(db: Any = None) -> str:
@@ -219,4 +240,86 @@ def aplicar_icono_aplicacion(target: Any = None, prefer_ico: bool = False) -> bo
     except Exception as e:
         logger.debug("No se pudo aplicar icono al objetivo '%s': %s", target, e)
         return False
+
+
+def configurar_ventana_dialogo(
+    dialog: QWidget,
+    *,
+    maximizable: bool = False,
+    permitir_cierre: bool = True,
+    aplicar_icono: bool = True,
+) -> None:
+    """Configura flags de ventana nativos e icono para asegurar el funcionamiento del botón X."""
+    if not permitir_cierre:
+        flags = DIALOG_LOCKED_FLAGS
+    elif maximizable:
+        flags = DIALOG_MAXIMIZED_FLAGS
+    else:
+        flags = DIALOG_STANDARD_FLAGS
+
+    dialog.setWindowFlags(flags)
+    if aplicar_icono:
+        aplicar_icono_aplicacion(dialog)
+
+
+def desvincular_worker_seguro(
+    worker: Any,
+    timeout_ms: int = 500,
+    cancelar: bool = True,
+) -> None:
+    """Detiene o desvincula de forma segura un QThread para evitar aborts al cerrar su ventana padre."""
+    if worker is None:
+        return
+    try:
+        esta_corriendo = bool(hasattr(worker, "isRunning") and worker.isRunning())
+        if esta_corriendo:
+            if cancelar and hasattr(worker, "cancelar"):
+                try:
+                    worker.cancelar()
+                except Exception:
+                    pass
+            if hasattr(worker, "requestInterruption"):
+                try:
+                    worker.requestInterruption()
+                except Exception:
+                    pass
+            if hasattr(worker, "quit"):
+                try:
+                    worker.quit()
+                except Exception:
+                    pass
+            if hasattr(worker, "wait"):
+                try:
+                    if not worker.wait(timeout_ms):
+                        _WORKERS_DESVINCULADOS.add(worker)
+                        if hasattr(worker, "setParent"):
+                            try:
+                                worker.setParent(None)
+                            except Exception:
+                                pass
+
+                        def _liberar() -> None:
+                            _WORKERS_DESVINCULADOS.discard(worker)
+                            try:
+                                worker.deleteLater()
+                            except Exception:
+                                pass
+
+                        if hasattr(worker, "finished"):
+                            try:
+                                worker.finished.connect(_liberar)
+                            except Exception:
+                                _WORKERS_DESVINCULADOS.discard(worker)
+                        if hasattr(worker, "isFinished") and worker.isFinished():
+                            _liberar()
+                        return
+                except Exception:
+                    pass
+        if hasattr(worker, "deleteLater"):
+            try:
+                worker.deleteLater()
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug("No se pudo desvincular worker de forma segura: %s", e)
 

@@ -7,7 +7,6 @@ from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
-    QDialog,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -23,12 +22,13 @@ from src.core.config import obtener_usuario_windows
 from src.core.logger import get_logger
 from src.domain.validators import parsear_fecha
 from src.services.records_service import RecordsService
+from src.ui.views.dialogs.base_dialog import BaseDialog
 from src.ui.views.dialogs.legajo_search_dialog import LegajoSearchDialog
 
 logger = get_logger("CambioTurnoDialog")
 
 
-class CambioTurnoDialog(QDialog):
+class CambioTurnoDialog(BaseDialog):
     """Formulario para solicitar o modificar una permuta / cambio de turno."""
 
     def __init__(
@@ -47,7 +47,6 @@ class CambioTurnoDialog(QDialog):
 
         self.setWindowTitle("Modificar Cambio de Turno" if cambio_existente else "Nuevo Cambio de Turno (Permuta)")
         self.resize(840, 580)
-        self.setWindowFlags((self.windowFlags() & ~Qt.WindowContextHelpButtonHint) | Qt.WindowCloseButtonHint)
 
         self._empleados_cache: List[Dict[str, Any]] = self.records_service.listar_empleados(incluir_inactivos=False)
         self._personal_estacion_cache: List[Dict[str, Any]] = self.records_service.listar_personal_estacion(incluir_inactivos=False)
@@ -55,10 +54,6 @@ class CambioTurnoDialog(QDialog):
         self._init_ui()
         if self.cambio_existente:
             self._cargar_datos_existentes()
-
-    def closeEvent(self, event) -> None:
-        self.reject()
-        event.accept()
 
     def _init_ui(self) -> None:
         main_layout = QVBoxLayout(self)
@@ -241,6 +236,8 @@ class CambioTurnoDialog(QDialog):
                 self._cargar_empleado(interviniente, emp)
 
     def _on_legajo_changed(self, interviniente: int) -> None:
+        if getattr(self, "_cerrando", False):
+            return
         txt = self.txt_legajo_1 if interviniente == 1 else self.txt_legajo_2
         val_str = txt.text().strip()
         if not val_str:

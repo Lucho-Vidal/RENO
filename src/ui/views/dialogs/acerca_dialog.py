@@ -4,7 +4,6 @@ from datetime import datetime
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -20,18 +19,17 @@ from PySide6.QtWidgets import (
 )
 
 from src.core.logger import exportar_logs_diagnostico, obtener_ruta_log
-from src.core.theme import aplicar_icono_aplicacion, cargar_pixmap_icono
+from src.core.theme import cargar_pixmap_icono
+from src.ui.views.dialogs.base_dialog import BaseDialog
 
 
-class AcercaDialog(QDialog):
+class AcercaDialog(BaseDialog):
     """Ventana modal informativa con detalles técnicos de arquitectura y changelog."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Acerca de RENO")
         self.resize(680, 520)
-        self.setWindowFlags((self.windowFlags() & ~Qt.WindowContextHelpButtonHint) | Qt.WindowCloseButtonHint)
-        aplicar_icono_aplicacion(self)
 
         self._init_ui()
 

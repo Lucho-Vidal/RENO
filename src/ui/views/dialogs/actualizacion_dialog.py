@@ -5,10 +5,8 @@ from __future__ import annotations
 import sys
 from typing import Any, Optional
 
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -23,17 +21,18 @@ from PySide6.QtWidgets import (
 
 from src.core.config import APP_VERSION
 from src.core.logger import get_logger
-from src.core.theme import aplicar_icono_aplicacion
+from src.core.theme import desvincular_worker_seguro
 from src.services.updater_service import (
     DescargarActualizacionWorker,
     InfoActualizacion,
     ejecutar_instalador_y_reiniciar,
 )
+from src.ui.views.dialogs.base_dialog import BaseDialog
 
 logger = get_logger("ActualizacionDialog")
 
 
-class ActualizacionDialog(QDialog):
+class ActualizacionDialog(BaseDialog):
     """Ventana interactiva de actualización de RENO con changelog, barra de progreso y reinicio desatendido."""
 
     def __init__(
@@ -43,27 +42,17 @@ class ActualizacionDialog(QDialog):
         parent: Optional[QWidget] = None,
         config: Optional[dict[str, Any]] = None,
     ):
-        super().__init__(parent)
         self.info = info
         self.es_obligatoria = es_obligatoria
         self.config = config
         self.worker_descarga: Optional[DescargarActualizacionWorker] = None
         self.ruta_instalador_descargado: Optional[str] = None
 
+        super().__init__(parent, permitir_cierre=not es_obligatoria)
+
         self.setWindowTitle(f"Actualización Disponible — RENO v{self.info.version}")
         self.resize(640, 520)
         self.setMinimumSize(560, 460)
-        aplicar_icono_aplicacion(self)
-
-        # Si es obligatoria, no permitimos cerrar con la cruz de la ventana sin actualizar
-        if self.es_obligatoria:
-            self.setWindowFlags(
-                (self.windowFlags() & ~Qt.WindowContextHelpButtonHint & ~Qt.WindowCloseButtonHint)
-                | Qt.CustomizeWindowHint
-                | Qt.WindowTitleHint
-            )
-        else:
-            self.setWindowFlags((self.windowFlags() & ~Qt.WindowContextHelpButtonHint) | Qt.WindowCloseButtonHint)
 
         self._init_ui()
 
@@ -320,6 +309,10 @@ class ActualizacionDialog(QDialog):
         self.lbl_estado_descarga.setText("Iniciando conexión con el servidor...")
         self.barra_progreso.setValue(0)
 
+        if self.worker_descarga is not None:
+            desvincular_worker_seguro(self.worker_descarga, timeout_ms=200, cancelar=True)
+            self.worker_descarga = None
+
         self.worker_descarga = DescargarActualizacionWorker(self.info, config=self.config, parent=self)
         self.worker_descarga.progreso.connect(self._on_progreso_descarga)
         self.worker_descarga.descarga_completada.connect(self._on_descarga_completada)
@@ -327,6 +320,8 @@ class ActualizacionDialog(QDialog):
         self.worker_descarga.start()
 
     def _on_progreso_descarga(self, bytes_act: int, bytes_tot: int, vel_bps: float, texto: str) -> None:
+        if getattr(self, "_cerrando", False):
+            return
         if bytes_tot > 0:
             pct = int((bytes_act / bytes_tot) * 100)
             self.barra_progreso.setValue(min(100, max(0, pct)))
@@ -341,7 +336,10 @@ class ActualizacionDialog(QDialog):
             self.lbl_velocidad.setText("")
 
     def _on_descarga_completada(self, ruta_instalador: str) -> None:
+        if getattr(self, "_cerrando", False):
+            return
         self.ruta_instalador_descargado = ruta_instalador
+        self._permitir_cierre_nativo = True
         self.barra_progreso.setValue(100)
         self.lbl_estado_descarga.setText("✅ Descarga completa e integridad SHA-256 verificada.")
         self.lbl_velocidad.setText("")
@@ -366,6 +364,8 @@ class ActualizacionDialog(QDialog):
         )
 
     def _on_error_descarga(self, error_msg: str) -> None:
+        if getattr(self, "_cerrando", False):
+            return
         self.lbl_estado_descarga.setText("❌ Error en la descarga.")
         self.lbl_velocidad.setText("")
         self.btn_accion.setText("Reintentar Descarga")
@@ -407,11 +407,25 @@ class ActualizacionDialog(QDialog):
                 "Por favor, cierre la aplicación y ejecute dicho archivo manualmente.",
             )
 
-    def closeEvent(self, event) -> None:
-        if self.worker_descarga and self.worker_descarga.isRunning():
-            self.worker_descarga.cancelar()
-            self.worker_descarga.wait(2000)
+    def done(self, result: int) -> None:
+        self._cerrando = True
+        if self.worker_descarga is not None:
+            desvincular_worker_seguro(self.worker_descarga, timeout_ms=500, cancelar=True)
+            self.worker_descarga = None
+        super().done(result)
 
+    def reject(self) -> None:
+        if self.es_obligatoria and not self.ruta_instalador_descargado:
+            QMessageBox.warning(
+                self,
+                "Actualización Requerida",
+                "Esta versión es de actualización obligatoria para garantizar la integridad operativa de los datos. "
+                "Debe presionar 'Descargar e Instalar Ahora'.",
+            )
+            return
+        super().reject()
+
+    def closeEvent(self, event) -> None:
         if self.es_obligatoria and not self.ruta_instalador_descargado:
             # Si es obligatoria y el usuario intenta cerrar sin actualizar, rechazamos
             event.ignore()
@@ -423,4 +437,10 @@ class ActualizacionDialog(QDialog):
             )
             return
 
-        super().closeEvent(event)
+        self._cerrando = True
+        if self.worker_descarga is not None:
+            desvincular_worker_seguro(self.worker_descarga, timeout_ms=500, cancelar=True)
+            self.worker_descarga = None
+
+        self.reject()
+        event.accept()

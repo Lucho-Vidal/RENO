@@ -36,6 +36,7 @@ from src.core.theme import (
     TEMA_OSCURO,
     aplicar_icono_aplicacion,
     aplicar_tema_visual,
+    desvincular_worker_seguro,
     guardar_tema_visual,
     obtener_tema_visual,
 )
@@ -108,6 +109,10 @@ class MainWindow(QMainWindow):
         self.backup_service = backup_service
         self.usuario_actual = usuario_actual
         self.supabase_sync = supabase_sync
+
+        self._cerrando = False
+        self._worker_updater: Optional[VerificarActualizacionWorker] = None
+        self._worker_manual_updater: Optional[VerificarActualizacionWorker] = None
 
         self.settings = AppSettings()
         self.outbox_queue = OutboxQueue(self.db)
@@ -498,7 +503,11 @@ class MainWindow(QMainWindow):
         self.timer_inactividad.start()
 
         # Verificación no bloqueante de actualizaciones a los 5 segundos del inicio (Estándar CRONO-PCT)
-        QTimer.singleShot(5000, self.verificar_actualizaciones_silenciosa)
+        self.timer_updater_inicial = QTimer(self)
+        self.timer_updater_inicial.setSingleShot(True)
+        self.timer_updater_inicial.setInterval(5000)
+        self.timer_updater_inicial.timeout.connect(self.verificar_actualizaciones_silenciosa)
+        self.timer_updater_inicial.start()
 
     def eventFilter(self, watched, event) -> bool:
         if event is not None and event.type() in (QEvent.MouseMove, QEvent.MouseButtonPress, QEvent.KeyPress):
@@ -947,17 +956,24 @@ class MainWindow(QMainWindow):
 
     def verificar_actualizaciones_silenciosa(self) -> None:
         """Verificación asíncrona no bloqueante de actualizaciones al iniciar la aplicación (Estándar CRONO-PCT)."""
+        if getattr(self, "_cerrando", False):
+            return
         cfg = cargar_configuracion_app()
         if not cfg.get("updater_auto_check", True):
             logger.debug("Verificación automática de actualizaciones deshabilitada por configuración.")
             return
         self._ultima_config_updater = cfg
+        if getattr(self, "_worker_updater", None) is not None:
+            desvincular_worker_seguro(self._worker_updater, timeout_ms=200, cancelar=True)
+            self._worker_updater = None
         self._worker_updater = VerificarActualizacionWorker(config=cfg, parent=self)
         self._worker_updater.actualizacion_disponible.connect(self._on_actualizacion_disponible_silenciosa)
         self._worker_updater.start()
 
     def _on_actualizacion_disponible_silenciosa(self, info: InfoActualizacion, es_obligatoria: bool) -> None:
         """Callback cuando el chequeo en segundo plano detecta una versión remota superior."""
+        if getattr(self, "_cerrando", False):
+            return
         self._ultima_info_actualizacion = info
         self._ultima_actualizacion_obligatoria = es_obligatoria
 
@@ -978,6 +994,8 @@ class MainWindow(QMainWindow):
         if es_obligatoria:
             # Si es obligatoria, abre el diálogo de actualización sin posponer
             def _abrir_obligatoria() -> None:
+                if getattr(self, "_cerrando", False):
+                    return
                 cfg_actual = getattr(self, "_ultima_config_updater", None) or cargar_configuracion_app()
                 ActualizacionDialog(info, es_obligatoria=True, parent=self, config=cfg_actual).exec()
 
@@ -985,22 +1003,30 @@ class MainWindow(QMainWindow):
         else:
             # Aviso no invasivo toast
             try:
-                toast = ToastWidget(
-                    self,
-                    f"🚀 Nueva versión v{info.version} disponible. Clic en el botón superior para actualizar.",
-                    duracion_seg=8,
+                self.toast.show_message(
+                    "Actualización Disponible",
+                    f"🚀 Nueva versión v{info.version} disponible. Clic aquí para actualizar.",
+                    duration_sec=8,
+                    action_text=None,
+                    on_click=self._on_clic_btn_actualizar,
                 )
-                toast.mostrar()
             except Exception:
                 pass
 
     def buscar_actualizaciones_manual(self, parent_dialog=None) -> None:
         """Verificación manual de actualizaciones invocada por el usuario con retroalimentación explícita."""
+        if getattr(self, "_cerrando", False):
+            return
         cfg = cargar_configuracion_app()
         self._ultima_config_updater = cfg
+        if getattr(self, "_worker_manual_updater", None) is not None:
+            desvincular_worker_seguro(self._worker_manual_updater, timeout_ms=200, cancelar=True)
+            self._worker_manual_updater = None
         self._worker_manual_updater = VerificarActualizacionWorker(config=cfg, parent=self)
 
         def _on_disponible(info: InfoActualizacion, es_obligatoria: bool):
+            if getattr(self, "_cerrando", False):
+                return
             self._ultima_info_actualizacion = info
             self._ultima_actualizacion_obligatoria = es_obligatoria
             self.btn_actualizar.setText(f"🚀 ¡Actualizar a v{info.version}!")
@@ -1013,6 +1039,8 @@ class MainWindow(QMainWindow):
             dlg.exec()
 
         def _on_al_dia():
+            if getattr(self, "_cerrando", False):
+                return
             QMessageBox.information(
                 parent_dialog or self,
                 "Sistema al Día",
@@ -1020,6 +1048,8 @@ class MainWindow(QMainWindow):
             )
 
         def _on_error(err: str):
+            if getattr(self, "_cerrando", False):
+                return
             QMessageBox.warning(
                 parent_dialog or self,
                 "Buscar Actualizaciones",
@@ -1074,17 +1104,43 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def closeEvent(self, event) -> None:
-        self.settings.set_window_geometry("MainWindow", self.saveGeometry())
-        app = QApplication.instance()
-        if app is not None:
-            app.removeEventFilter(self)
-        for timer_attr in ("timer_refresh", "timer_sync", "timer_inactividad"):
+        self._cerrando = True
+        try:
+            self.settings.set_window_geometry("MainWindow", self.saveGeometry())
+        except Exception:
+            pass
+        try:
+            app = QApplication.instance()
+            if app is not None:
+                app.removeEventFilter(self)
+        except Exception:
+            pass
+        for timer_attr in ("timer_refresh", "timer_sync", "timer_inactividad", "timer_updater_inicial"):
             timer = getattr(self, timer_attr, None)
             if timer is not None:
-                timer.stop()
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
+        if hasattr(self, "tab_administracion") and hasattr(self.tab_administracion, "cerrar_limpiamente"):
+            try:
+                self.tab_administracion.cerrar_limpiamente()
+            except Exception:
+                pass
+        for worker_attr in ("_worker_updater", "_worker_manual_updater"):
+            worker = getattr(self, worker_attr, None)
+            if worker is not None:
+                desvincular_worker_seguro(worker, timeout_ms=500, cancelar=True)
+                setattr(self, worker_attr, None)
         toast = getattr(self, "toast", None)
         if toast is not None:
-            toast.close()
+            try:
+                if hasattr(toast, "_timer") and toast._timer is not None:
+                    toast._timer.stop()
+                toast.close()
+            except Exception:
+                pass
+        event.accept()
         super().closeEvent(event)
 
     def _restaurar_geometria(self) -> None:

@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Optional
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
-    QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -21,11 +20,12 @@ from PySide6.QtWidgets import (
 from src.core.logger import get_logger
 from src.services.records_service import RecordsService
 from src.ui.models.base_table_model import BaseTableModel
+from src.ui.views.dialogs.base_dialog import BaseDialog
 
 logger = get_logger("DetalleTurnoDialog")
 
 
-class DetalleTurnoDialog(QDialog):
+class DetalleTurnoDialog(BaseDialog):
     """Visualizador detallado del diagrama completo de un turno con selección de itinerario."""
 
     def __init__(
@@ -45,7 +45,6 @@ class DetalleTurnoDialog(QDialog):
 
         self.setWindowTitle(f"Detalle Completo del Turno: {self.codigo_turno}")
         self.resize(920, 620)
-        self.setWindowFlags((self.windowFlags() & ~Qt.WindowContextHelpButtonHint) | Qt.WindowCloseButtonHint)
 
         self._init_ui()
         self._cargar_itinerarios()

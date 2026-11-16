@@ -20,7 +20,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
-    QDialog,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -62,7 +61,12 @@ from src.core.proxy import (
     detectar_proxy_sistema,
     probar_conexion_supabase,
 )
-from src.core.theme import TEMA_CLARO, TEMA_OSCURO, aplicar_icono_aplicacion, obtener_tema_visual
+from src.core.theme import (
+    TEMA_CLARO,
+    TEMA_OSCURO,
+    desvincular_worker_seguro,
+    obtener_tema_visual,
+)
 from src.domain.enums import (
     PERMISOS_BASE,
     PERMISOS_METADATA,
@@ -75,25 +79,9 @@ from src.services.excel_service import ExcelService
 from src.services.records_service import RecordsService
 from src.ui.models.base_table_model import BaseTableModel
 from src.ui.models.multi_filter_proxy import MultiFilterProxyModel
+from src.ui.views.dialogs.base_dialog import BaseDialog, BaseMaximizedDialog
 
 logger = get_logger("AdminDialogs")
-
-
-class BaseMaximizedDialog(QDialog):
-    """Clase base para garantizar que todos los modales principales de administración se abran maximizados y respondan al cierre."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowFlags(Qt.Window | Qt.WindowTitleHint | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint)
-        aplicar_icono_aplicacion(self)
-
-    def closeEvent(self, event) -> None:
-        self.reject()
-        event.accept()
-
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        self.showMaximized()
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +170,7 @@ class AdminUsuariosWidget(QWidget):
 
     def _nuevo_usuario(self) -> None:
         roles_disponibles = [r["nombre"] for r in self.auth_service.listar_roles()]
-        dlg = QDialog(self)
+        dlg = BaseDialog(self)
         dlg.setWindowTitle("Nuevo Usuario")
         dlg.setMinimumWidth(400)
         form = QFormLayout(dlg)
@@ -243,7 +231,7 @@ class AdminUsuariosWidget(QWidget):
         roles_actuales = [r.strip() for r in (u.get("roles") or "").split(",") if r.strip()]
         rol_principal = roles_actuales[0] if roles_actuales else ""
 
-        dlg = QDialog(self)
+        dlg = BaseDialog(self)
         dlg.setWindowTitle(f"Modificar Usuario - {u['username']}")
         dlg.setMinimumWidth(420)
         form = QFormLayout(dlg)
@@ -326,10 +314,9 @@ class AdminUsuariosWidget(QWidget):
             QMessageBox.warning(self, "Usuarios", "Seleccione un usuario en la tabla para cambiar o restablecer su contraseña.")
             return
 
-        dlg = QDialog(self)
+        dlg = BaseDialog(self)
         dlg.setWindowTitle(f"Cambiar / Restablecer Clave - {u['username']}")
         dlg.setMinimumWidth(400)
-        dlg.setWindowFlags((dlg.windowFlags() & ~Qt.WindowContextHelpButtonHint) | Qt.WindowCloseButtonHint)
 
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(20, 16, 20, 16)
@@ -947,7 +934,7 @@ class AdminEmpleadosDialog(BaseMaximizedDialog):
         self._formulario_empleado(emp)
 
     def _formulario_empleado(self, emp_existente: Optional[Dict[str, Any]]) -> None:
-        dlg = QDialog(self)
+        dlg = BaseDialog(self)
         dlg.setWindowTitle("Modificar Empleado" if emp_existente else "Nuevo Empleado")
         dlg.setFixedSize(450, 400)
         lay = QFormLayout(dlg)
@@ -1228,7 +1215,7 @@ class AdminCatalogosWidget(QWidget):
         if not self._can("tiposNovedad.administrar"):
             QMessageBox.warning(self, "Permiso Denegado", "No posee permiso para administrar tipos de novedad.")
             return
-        dlg = QDialog(self)
+        dlg = BaseDialog(self)
         dlg.setWindowTitle("Nuevo Tipo de Novedad")
         dlg.setFixedSize(380, 210)
         lay = QFormLayout(dlg)
@@ -1270,7 +1257,7 @@ class AdminCatalogosWidget(QWidget):
             return
         t = self._tipos[row]
 
-        dlg = QDialog(self)
+        dlg = BaseDialog(self)
         dlg.setWindowTitle("Modificar Tipo de Novedad")
         dlg.setFixedSize(380, 240)
         lay = QFormLayout(dlg)
@@ -1340,7 +1327,7 @@ class AdminCatalogosWidget(QWidget):
         if not self._can("dotaciones.administrar"):
             QMessageBox.warning(self, "Permiso Denegado", "No posee permiso para administrar dotaciones.")
             return
-        dlg = QDialog(self)
+        dlg = BaseDialog(self)
         dlg.setWindowTitle("Nueva Dotación")
         dlg.setFixedSize(340, 140)
         lay = QFormLayout(dlg)
@@ -1370,7 +1357,7 @@ class AdminCatalogosWidget(QWidget):
             return
         d = self._dots[row]
 
-        dlg = QDialog(self)
+        dlg = BaseDialog(self)
         dlg.setWindowTitle("Modificar Dotación")
         dlg.setFixedSize(340, 170)
         lay = QFormLayout(dlg)
@@ -1429,7 +1416,7 @@ class AdminCatalogosWidget(QWidget):
             QMessageBox.warning(self, "Permiso Denegado", "No posee permiso para crear personal de estación.")
             return
         dots = [d["nombre"] for d in self.records_service.listar_dotaciones(incluir_inactivos=False)]
-        dlg = QDialog(self)
+        dlg = BaseDialog(self)
         dlg.setWindowTitle("Nuevo Personal de Estación")
         dlg.setFixedSize(380, 170)
         lay = QFormLayout(dlg)
@@ -1470,7 +1457,7 @@ class AdminCatalogosWidget(QWidget):
         p = self._pes[row]
 
         dots = [d["nombre"] for d in self.records_service.listar_dotaciones(incluir_inactivos=False)]
-        dlg = QDialog(self)
+        dlg = BaseDialog(self)
         dlg.setWindowTitle("Modificar Personal de Estación")
         dlg.setFixedSize(380, 200)
         lay = QFormLayout(dlg)
@@ -1772,7 +1759,7 @@ class AdminDestinatariosWidget(QWidget):
             return
 
         titulo = "Nuevo Destinatario - Novedades (Informe)" if tipo == "informe" else "Nuevo Destinatario - Ordenamientos Operativos"
-        dlg = QDialog(self)
+        dlg = BaseDialog(self)
         dlg.setWindowTitle(titulo)
         dlg.setFixedSize(420, 180)
         lay = QFormLayout(dlg)
@@ -1845,7 +1832,7 @@ class AdminDestinatariosWidget(QWidget):
             return
 
         titulo = "Modificar Destinatario - Informe" if tipo == "informe" else "Modificar Destinatario - Ordenamientos"
-        dlg = QDialog(self)
+        dlg = BaseDialog(self)
         dlg.setWindowTitle(titulo)
         dlg.setFixedSize(420, 210)
         lay = QFormLayout(dlg)
@@ -2011,6 +1998,8 @@ class AdminConfigWidget(QWidget):
             self.records_service = records_service
         self.usuario_actual = usuario_actual or {}
         self.tiene_permiso_fn = tiene_permiso_fn
+        self._cerrando = False
+        self._worker_cfg_updater = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2363,16 +2352,31 @@ class AdminConfigWidget(QWidget):
         bucket = str(cargar_configuracion_json().get("supabase_storage_bucket") or "updates").strip().strip("/") or "updates"
         self.txt_updater_url.setText(f"{sb_url}/storage/v1/object/public/{bucket}/version.json")
 
+    def cerrar_limpiamente(self) -> None:
+        """Marca el cierre del panel y desvincula cualquier worker de actualización en curso."""
+        self._cerrando = True
+        if getattr(self, "_worker_cfg_updater", None) is not None:
+            desvincular_worker_seguro(self._worker_cfg_updater, timeout_ms=500, cancelar=True)
+            self._worker_cfg_updater = None
+
     def _comprobar_actualizaciones_manual(self) -> None:
+        if getattr(self, "_cerrando", False):
+            return
         from src.services.updater_service import VerificarActualizacionWorker
 
         self.btn_buscar_updates_cfg.setEnabled(False)
         self.lbl_updater_status.setText("Conectando con el servidor de actualizaciones...")
         cfg_temp = self._recopilar_config_pantalla()
 
+        if getattr(self, "_worker_cfg_updater", None) is not None:
+            desvincular_worker_seguro(self._worker_cfg_updater, timeout_ms=200, cancelar=True)
+            self._worker_cfg_updater = None
+
         self._worker_cfg_updater = VerificarActualizacionWorker(config=cfg_temp, parent=self)
 
         def _on_disponible(info, es_obligatoria: bool) -> None:
+            if getattr(self, "_cerrando", False):
+                return
             self.btn_buscar_updates_cfg.setEnabled(True)
             self.lbl_updater_status.setText(f"🚀 Nueva versión disponible: v{info.version}")
             from src.ui.views.dialogs.actualizacion_dialog import ActualizacionDialog
@@ -2381,11 +2385,15 @@ class AdminConfigWidget(QWidget):
             dlg.exec()
 
         def _on_actualizado() -> None:
+            if getattr(self, "_cerrando", False):
+                return
             self.btn_buscar_updates_cfg.setEnabled(True)
             self.lbl_updater_status.setText("✅ Ya tienes la última versión instalada.")
             QMessageBox.information(self, "Actualizaciones", "La aplicación está actualizada a la última versión.")
 
         def _on_error(err: str) -> None:
+            if getattr(self, "_cerrando", False):
+                return
             self.btn_buscar_updates_cfg.setEnabled(True)
             self.lbl_updater_status.setText(f"❌ Error: {err}")
             QMessageBox.warning(self, "Actualizaciones", f"No se pudo comprobar actualizaciones:\n{err}")
@@ -2783,6 +2791,16 @@ class AdminConfigDialog(BaseMaximizedDialog):
 
     def recargar(self) -> None:
         self.widget.recargar()
+
+    def done(self, result: int) -> None:
+        if hasattr(self, "widget") and hasattr(self.widget, "cerrar_limpiamente"):
+            self.widget.cerrar_limpiamente()
+        super().done(result)
+
+    def closeEvent(self, event) -> None:
+        if hasattr(self, "widget") and hasattr(self.widget, "cerrar_limpiamente"):
+            self.widget.cerrar_limpiamente()
+        super().closeEvent(event)
 
 
 # ---------------------------------------------------------------------------

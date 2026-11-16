@@ -3,7 +3,6 @@
 from typing import Any, Dict, Optional
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -16,14 +15,15 @@ from PySide6.QtWidgets import (
 )
 
 from src.core.logger import get_logger
-from src.core.theme import aplicar_icono_aplicacion, cargar_pixmap_icono, obtener_tema_visual
+from src.core.theme import cargar_pixmap_icono, obtener_tema_visual
 from src.services.auth_service import AuthService, CuentaBloqueadaError
 from src.services.mail_service import MailService
+from src.ui.views.dialogs.base_dialog import BaseDialog
 
 logger = get_logger("LoginDialog")
 
 
-class CambioPasswordObligatorioDialog(QDialog):
+class CambioPasswordObligatorioDialog(BaseDialog):
     """Diálogo modal forzoso para actualizar contraseñas vencidas o temporales."""
 
     def __init__(self, user_id: int, auth_service: AuthService, parent=None):
@@ -33,8 +33,6 @@ class CambioPasswordObligatorioDialog(QDialog):
 
         self.setWindowTitle("Actualización Obligatoria de Contraseña")
         self.setMinimumWidth(420)
-        self.setWindowFlags((self.windowFlags() & ~Qt.WindowContextHelpButtonHint) | Qt.WindowCloseButtonHint)
-        aplicar_icono_aplicacion(self)
 
         es_oscuro = obtener_tema_visual() == "oscuro"
         color_info = "#CBD5E1" if es_oscuro else "#4B5563"
@@ -127,7 +125,7 @@ class CambioPasswordObligatorioDialog(QDialog):
             QMessageBox.critical(self, "Error", f"No se pudo cambiar la contraseña:\n{e}")
 
 
-class LoginDialog(QDialog):
+class LoginDialog(BaseDialog):
     """Pantalla de inicio de sesión con soporte para primer inicio y reseteo de clave."""
 
     def __init__(self, auth_service: AuthService, parent=None):
@@ -137,8 +135,6 @@ class LoginDialog(QDialog):
 
         self.setWindowTitle("Acceso a RENO v2.0")
         self.setFixedSize(380, 360)
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-        aplicar_icono_aplicacion(self)
 
         self._es_primer_inicio = len(self.auth_service.listar_usuarios()) == 0
         self._init_ui()

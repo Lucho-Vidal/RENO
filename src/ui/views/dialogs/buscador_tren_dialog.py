@@ -5,7 +5,6 @@ from typing import Any, Dict, List, Optional
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCompleter,
-    QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -22,11 +21,12 @@ from src.core.logger import get_logger
 from src.services.excel_service import ExcelService
 from src.services.records_service import RecordsService
 from src.ui.models.base_table_model import BaseTableModel
+from src.ui.views.dialogs.base_dialog import BaseDialog
 
 logger = get_logger("BuscadorTrenDialog")
 
 
-class BuscadorTrenDialog(QDialog):
+class BuscadorTrenDialog(BaseDialog):
     """Herramienta de consulta rápida que lista todos los turnos que operan sobre un tren."""
 
     def __init__(
@@ -43,7 +43,6 @@ class BuscadorTrenDialog(QDialog):
 
         self.setWindowTitle("🔍 Buscador de Turnos por Número de Tren")
         self.resize(1050, 600)
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 
         self._init_ui()
 

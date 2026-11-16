@@ -11,7 +11,6 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDialog,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -32,6 +31,7 @@ from src.services.excel_service import ExcelService
 from src.services.records_service import RecordsService
 from src.ui.models.base_table_model import BaseTableModel
 from src.ui.models.multi_filter_proxy import MultiFilterProxyModel
+from src.ui.views.dialogs.base_dialog import BaseDialog
 
 logger = get_logger("EmpleadosView")
 
@@ -213,7 +213,7 @@ class EmpleadosView(QWidget):
         self._formulario_empleado(emp)
 
     def _formulario_empleado(self, emp_existente: Optional[Dict[str, Any]]) -> None:
-        dlg = QDialog(self)
+        dlg = BaseDialog(self)
         dlg.setWindowTitle("Modificar Empleado" if emp_existente else "Nuevo Empleado")
         dlg.resize(460, 420)
         lay = QFormLayout(dlg)

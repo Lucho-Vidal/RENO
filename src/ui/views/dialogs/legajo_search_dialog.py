@@ -3,7 +3,6 @@
 from typing import Any, Dict, List, Optional
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -15,25 +14,21 @@ from PySide6.QtWidgets import (
 
 from src.ui.models.base_table_model import BaseTableModel
 from src.ui.models.multi_filter_proxy import MultiFilterProxyModel
+from src.ui.views.dialogs.base_dialog import BaseDialog
 
 
-class LegajoSearchDialog(QDialog):
+class LegajoSearchDialog(BaseDialog):
     """Buscador modal interactivo de empleados para formularios."""
 
     def __init__(self, empleados: List[Dict[str, Any]], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Búsqueda de Empleados")
         self.resize(780, 500)
-        self.setWindowFlags((self.windowFlags() & ~Qt.WindowContextHelpButtonHint) | Qt.WindowCloseButtonHint)
 
         self._empleados = list(empleados or [])
         self.selected_empleado: Optional[Dict[str, Any]] = None
 
         self._init_ui()
-
-    def closeEvent(self, event) -> None:
-        self.reject()
-        event.accept()
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)

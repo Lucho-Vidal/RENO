@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDateEdit,
-    QDialog,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -35,11 +34,12 @@ from src.services.excel_service import ExcelService
 from src.services.pdf_service import PDFService
 from src.services.records_service import RecordsService
 from src.ui.models.base_table_model import BaseTableModel
+from src.ui.views.dialogs.base_dialog import BaseDialog, BaseMaximizedDialog
 
 logger = get_logger("CalendarioCicloDialog")
 
 
-class AsignarJornadaDialog(QDialog):
+class AsignarJornadaDialog(BaseDialog):
     """Diálogo modal para registrar horario de toma/deja o franco anticipado."""
 
     def __init__(
@@ -217,7 +217,7 @@ class AsignarJornadaDialog(QDialog):
         self.accept()
 
 
-class CalendarioCicloDialog(QDialog):
+class CalendarioCicloDialog(BaseMaximizedDialog):
     """Ventana del Calendario Mensual de Personal de Ciclo (abierta maximizada)."""
 
     def __init__(
@@ -247,7 +247,6 @@ class CalendarioCicloDialog(QDialog):
 
         self.setWindowTitle(f"Calendario Mensual de Ciclo - {self.empleado.get('apellidos_nombres')} (Leg. {self.empleado.get('legajo')})")
         self.resize(1100, 700)
-        self.setWindowFlags(Qt.Window | Qt.WindowTitleHint | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint)
 
         self._init_ui()
         self.cargar_mes()
@@ -256,15 +255,6 @@ class CalendarioCicloDialog(QDialog):
         if self.tiene_permiso_fn:
             return bool(self.tiene_permiso_fn(perm))
         return True
-
-    def closeEvent(self, event) -> None:
-        self.reject()
-        event.accept()
-
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        # Requerimiento: modales maximizados para garantizar visibilidad completa
-        self.showMaximized()
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)

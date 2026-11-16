@@ -13,7 +13,6 @@ from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
-    QDialog,
     QDialogButtonBox,
     QFrame,
     QGroupBox,
@@ -35,6 +34,7 @@ from src.services.excel_service import ExcelService
 from src.services.pdf_service import PDFService
 from src.services.records_service import RecordsService
 from src.ui.models.base_table_model import BaseTableModel
+from src.ui.views.dialogs.base_dialog import BaseDialog
 from src.ui.views.dialogs.calendario_ciclo_dialog import CalendarioCicloDialog
 
 logger = get_logger("PersonalCicloView")
@@ -391,7 +391,7 @@ class PersonalCicloView(QWidget):
                 except Exception as e:
                     QMessageBox.critical(self, "Error", f"No se pudo asignar el relevo:\n{e}")
         else:
-            dlg = QDialog(self)
+            dlg = BaseDialog(self)
             dlg.setWindowTitle("Seleccionar Novedad a Cubrir")
             dlg.resize(520, 320)
             lay = QVBoxLayout(dlg)

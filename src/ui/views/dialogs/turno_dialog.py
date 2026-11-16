@@ -5,7 +5,6 @@ from PySide6.QtCore import QTime, Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDialog,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -25,11 +24,12 @@ from PySide6.QtWidgets import (
 
 from src.core.logger import get_logger
 from src.services.records_service import RecordsService
+from src.ui.views.dialogs.base_dialog import BaseDialog
 
 logger = get_logger("TurnoDialog")
 
 
-class VueltaItemDialog(QDialog):
+class VueltaItemDialog(BaseDialog):
     """Mini modal para agregar o editar un tramo/vuelta de tren del turno."""
 
     def __init__(self, vuelta_existente: Optional[Dict[str, Any]] = None, parent=None):
@@ -37,7 +37,6 @@ class VueltaItemDialog(QDialog):
         self.vuelta_existente = vuelta_existente or {}
         self.setWindowTitle("Editar Vuelta de Tren" if vuelta_existente else "Agregar Vuelta de Tren")
         self.resize(380, 300)
-        self.setWindowFlags((self.windowFlags() & ~Qt.WindowContextHelpButtonHint) | Qt.WindowCloseButtonHint)
 
         self._init_ui()
 
@@ -115,7 +114,7 @@ class VueltaItemDialog(QDialog):
         }
 
 
-class TurnoDialog(QDialog):
+class TurnoDialog(BaseDialog):
     """Formulario modal para crear o editar un turno y su diagrama de vueltas."""
 
     def __init__(
@@ -132,7 +131,6 @@ class TurnoDialog(QDialog):
 
         self.setWindowTitle("Modificar Turno de Itinerario" if turno_id else "Nuevo Turno de Itinerario")
         self.resize(860, 640)
-        self.setWindowFlags((self.windowFlags() & ~Qt.WindowContextHelpButtonHint) | Qt.WindowCloseButtonHint)
 
         self._vueltas: List[Dict[str, Any]] = []
         self._init_ui()

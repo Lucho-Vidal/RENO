@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDateEdit,
-    QDialog,
     QFrame,
     QGridLayout,
     QGroupBox,
@@ -33,12 +32,13 @@ from src.core.logger import get_logger
 from src.core.config import obtener_usuario_windows
 from src.domain.validators import es_turno_ciclo, parsear_fecha
 from src.services.records_service import RecordsService
+from src.ui.views.dialogs.base_dialog import BaseDialog
 from src.ui.views.dialogs.legajo_search_dialog import LegajoSearchDialog
 
 logger = get_logger("NovedadDialog")
 
 
-class TramoEditDialog(QDialog):
+class TramoEditDialog(BaseDialog):
     """Diálogo modal secundario para agregar o modificar un tramo de relevo de ciclo."""
 
     def __init__(
@@ -153,7 +153,7 @@ class TramoEditDialog(QDialog):
         self.accept()
 
 
-class NovedadDialog(QDialog):
+class NovedadDialog(BaseDialog):
     """Formulario modal para crear o editar una novedad operativa."""
 
     def __init__(
@@ -176,7 +176,6 @@ class NovedadDialog(QDialog):
 
         self.setWindowTitle("Modificar Novedad" if novedad_existente else "Nueva Novedad Operativa")
         self.resize(840, 680)
-        self.setWindowFlags((self.windowFlags() & ~Qt.WindowContextHelpButtonHint) | Qt.WindowCloseButtonHint)
 
         self._empleados_cache: List[Dict[str, Any]] = self.records_service.listar_empleados(incluir_inactivos=False)
         self._tipos_cache: List[Dict[str, Any]] = self.records_service.listar_tipos(incluir_inactivos=False)
@@ -185,10 +184,6 @@ class NovedadDialog(QDialog):
         self._init_ui()
         if self.novedad_existente:
             self._cargar_datos_existentes()
-
-    def closeEvent(self, event) -> None:
-        self.reject()
-        event.accept()
 
     def _init_ui(self) -> None:
         main_layout = QVBoxLayout(self)
@@ -409,6 +404,8 @@ class NovedadDialog(QDialog):
                 self._cargar_empleado_en_formulario(emp)
 
     def _on_legajo_changed(self) -> None:
+        if getattr(self, "_cerrando", False):
+            return
         leg_str = self.txt_legajo.text().strip()
         if not leg_str:
             return
