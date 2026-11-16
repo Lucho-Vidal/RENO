@@ -77,7 +77,8 @@ class DetalleTurnoDialog(BaseDialog):
         self.combo_regimen.addItem("D - Domingo", "D")
         self.combo_regimen.addItem("TODOS - Sin distinción", "TODOS")
         if self.regimen_inicial:
-            idx_r = self.combo_regimen.findData(self.regimen_inicial)
+            reg_norm = self.records_service.normalizar_regimen_turno(self.regimen_inicial, default="")
+            idx_r = self.combo_regimen.findData(reg_norm or self.regimen_inicial)
             if idx_r >= 0:
                 self.combo_regimen.setCurrentIndex(idx_r)
         self.combo_regimen.currentIndexChanged.connect(self._on_itinerario_changed)

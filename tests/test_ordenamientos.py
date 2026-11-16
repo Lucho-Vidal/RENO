@@ -85,11 +85,11 @@ def test_crud_e_importacion_excel_paradas_tren(tmp_path: Path):
     init_database_schema(db)
     svc = RecordsService(db)
 
-    # 1. Crear paradas manuales (CRUD)
+    # 1. Crear paradas manuales (CRUD) usando régimen Hábil 'H'
     p1 = svc.crear_parada_tren({
         "nro_tren": "1293",
         "itinerario": "H45",
-        "regimen": "LV",
+        "regimen": "H",
         "orden_parada": 1,
         "estacion": "P. Constitución",
         "hora_paso": "08:00",
@@ -97,7 +97,7 @@ def test_crud_e_importacion_excel_paradas_tren(tmp_path: Path):
     p2 = svc.crear_parada_tren({
         "nro_tren": "1293",
         "itinerario": "H45",
-        "regimen": "LV",
+        "regimen": "LV",  # Alias legacy debe normalizarse automáticamente a 'H'
         "orden_parada": 2,
         "estacion": "Temperley",
         "hora_paso": "08:25",
@@ -107,7 +107,7 @@ def test_crud_e_importacion_excel_paradas_tren(tmp_path: Path):
     svc.actualizar_parada_tren(p2, {
         "nro_tren": "1293",
         "itinerario": "H45",
-        "regimen": "LV",
+        "regimen": "H",
         "orden_parada": 2,
         "estacion": "Temperley",
         "hora_paso": "08:27",
@@ -118,17 +118,20 @@ def test_crud_e_importacion_excel_paradas_tren(tmp_path: Path):
     assert paradas[0] == {"estacion": "P. Constitución", "hora": "08:00"}
     assert paradas[1] == {"estacion": "Temperley", "hora": "08:27"}
 
-    # 3. Importar desde Excel
+    # 3. Importar desde Excel (una fila con 'H' y otra con alias legacy 'LV')
     xlsx_path = tmp_path / "paradas_tren.xlsx"
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.append(["NRO_TREN", "ORDEN", "ESTACION", "HORA_PASO", "ITINERARIO", "REGIMEN"])
-    ws.append(["1293", 3, "Llavallol", "08:38", "H45", "LV"])
+    ws.append(["1293", 3, "Llavallol", "08:38", "H45", "H"])
     ws.append(["1293", 4, "Ezeiza", "08:55", "H45", "LV"])
     wb.save(xlsx_path)
 
     insertados = svc.importar_paradas_tren_excel(str(xlsx_path))
     assert insertados == 2
+
+    lista_1293 = svc.listar_paradas_tren(nro_tren="1293")
+    assert all(p["regimen"] == "H" for p in lista_1293)
 
     paradas_post = svc.obtener_estaciones_y_horarios_por_tren("1293", "H45")
     assert len(paradas_post) == 4
@@ -161,7 +164,7 @@ def test_ordenamientos_dotaciones_dinamicas_ventana_y_papelera(tmp_path: Path):
             "deposito": "LLV",
             "itinerario": "H45",
             "ciclo_o_turno": "CICLO 2",
-            "regimen": "LV",
+            "regimen": "H",
             "motivo_orden": "Relevo de urgencia por diagramación Control Trenes",
             "observacion_pie": "Presentarse en plataforma 2",
             "ref_pct": "Gomez (LLV)",
@@ -287,7 +290,7 @@ def test_ordenamiento_visible_al_buscar_tren_en_buscador(qapp, tmp_path: Path):
             "deposito": "PC",
             "itinerario": "H45",
             "ciclo_o_turno": "401.1",
-            "regimen": "LV",
+            "regimen": "H",
             "motivo_orden": "Ordenamiento especial sobre tren 2303",
             "observacion_pie": "",
             "ref_pct": "PC",

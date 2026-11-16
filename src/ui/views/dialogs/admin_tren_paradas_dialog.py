@@ -336,7 +336,12 @@ class AdminTrenParadasDialog(BaseMaximizedDialog):
 
         lay_f.addWidget(QLabel("Régimen:"))
         self.combo_filtro_regimen = QComboBox()
-        self.combo_filtro_regimen.addItems(["Todos", "LV", "S", "D", "DIAGRAMA_6D", "UNIPERSONAL"])
+        self.combo_filtro_regimen.addItem("Todos", "Todos")
+        self.combo_filtro_regimen.addItem("H - Hábil", "H")
+        self.combo_filtro_regimen.addItem("S - Sábado", "S")
+        self.combo_filtro_regimen.addItem("D - Domingo", "D")
+        self.combo_filtro_regimen.addItem("DIAGRAMA_6D", "DIAGRAMA_6D")
+        self.combo_filtro_regimen.addItem("UNIPERSONAL", "UNIPERSONAL")
         self.combo_filtro_regimen.currentIndexChanged.connect(self.refrescar_tabla)
         lay_f.addWidget(self.combo_filtro_regimen)
 
@@ -361,18 +366,50 @@ class AdminTrenParadasDialog(BaseMaximizedDialog):
         # Splitter Principal: Tabla a la izquierda + Formulario CRUD a la derecha
         splitter = QSplitter(Qt.Horizontal)
 
-        # Panel Izquierdo: Tabla
+        # Panel Izquierdo: Tabla y barra de eliminación múltiple/filtro/total
         left_widget = QWidget()
         left_lay = QVBoxLayout(left_widget)
         left_lay.setContentsMargins(0, 0, 0, 0)
+        left_lay.setSpacing(6)
 
         self.lbl_contador = QLabel("0 paradas registradas")
         self.lbl_contador.setStyleSheet("font-weight: bold;")
         left_lay.addWidget(self.lbl_contador)
 
+        bar_acciones_tabla = QHBoxLayout()
+        bar_acciones_tabla.setSpacing(6)
+
+        self.btn_sel_todas = QPushButton("☑️ Seleccionar Visibles")
+        self.btn_sel_todas.setObjectName("btnSecondary")
+        self.btn_sel_todas.setToolTip("Selecciona todas las filas actualmente visibles en la tabla")
+        self.btn_sel_todas.clicked.connect(self._seleccionar_visibles)
+        bar_acciones_tabla.addWidget(self.btn_sel_todas)
+
+        self.btn_eliminar = QPushButton("🗑️ Eliminar Seleccionadas")
+        self.btn_eliminar.setObjectName("btnDanger")
+        self.btn_eliminar.setEnabled(False)
+        self.btn_eliminar.setToolTip("Elimina una o múltiples paradas seleccionadas en la tabla (Ctrl+Clic / Shift+Clic)")
+        self.btn_eliminar.clicked.connect(self._eliminar_paradas_seleccionadas)
+        bar_acciones_tabla.addWidget(self.btn_eliminar)
+
+        self.btn_eliminar_filtro = QPushButton("🗑️ Eliminar por Filtro")
+        self.btn_eliminar_filtro.setObjectName("btnDanger")
+        self.btn_eliminar_filtro.setToolTip("Elimina permanentemente todas las paradas que coincidan con los filtros aplicados")
+        self.btn_eliminar_filtro.clicked.connect(self._eliminar_por_filtros)
+        bar_acciones_tabla.addWidget(self.btn_eliminar_filtro)
+
+        self.btn_eliminar_todas = QPushButton("🗑️ Eliminar Todas")
+        self.btn_eliminar_todas.setObjectName("btnDanger")
+        self.btn_eliminar_todas.setToolTip("Vacía por completo el catálogo de paradas por tren")
+        self.btn_eliminar_todas.clicked.connect(self._eliminar_todas_paradas)
+        bar_acciones_tabla.addWidget(self.btn_eliminar_todas)
+
+        bar_acciones_tabla.addStretch()
+        left_lay.addLayout(bar_acciones_tabla)
+
         self.tabla = QTableWidget(0, 8)
         self.tabla.setHorizontalHeaderLabels([
-            "ID", "N° TREN", "ORDEN", "ESTACIÓN / PARADA", "SIGLA", "HORA PASO", "ITINERARIO", "RÉGIMEN"
+            "ID", "N° TREN", "ORDEN", "ESTACIÓN / PARADA", "SIGLA", "HORA PASO", "ITINERARIO", "DÍA / RÉGIMEN"
         ])
         self.tabla.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.tabla.setColumnWidth(0, 55)
@@ -382,9 +419,9 @@ class AdminTrenParadasDialog(BaseMaximizedDialog):
         self.tabla.setColumnWidth(4, 65)
         self.tabla.setColumnWidth(5, 80)
         self.tabla.setColumnWidth(6, 85)
-        self.tabla.setColumnWidth(7, 75)
+        self.tabla.setColumnWidth(7, 95)
         self.tabla.setSelectionBehavior(QTableWidget.SelectRows)
-        self.tabla.setSelectionMode(QTableWidget.SingleSelection)
+        self.tabla.setSelectionMode(QTableWidget.ExtendedSelection)
         self.tabla.setEditTriggers(QTableWidget.NoEditTriggers)
         self.tabla.itemSelectionChanged.connect(self._on_seleccion_tabla)
         left_lay.addWidget(self.tabla)
@@ -429,7 +466,11 @@ class AdminTrenParadasDialog(BaseMaximizedDialog):
         f_grid.addRow("Itinerario:", self.combo_itin)
 
         self.combo_regimen = QComboBox()
-        self.combo_regimen.addItems(["LV", "S", "D", "DIAGRAMA_6D", "UNIPERSONAL"])
+        self.combo_regimen.addItem("H - Hábil", "H")
+        self.combo_regimen.addItem("S - Sábado", "S")
+        self.combo_regimen.addItem("D - Domingo", "D")
+        self.combo_regimen.addItem("DIAGRAMA_6D", "DIAGRAMA_6D")
+        self.combo_regimen.addItem("UNIPERSONAL", "UNIPERSONAL")
         f_grid.addRow("Régimen:", self.combo_regimen)
 
         form_lay.addLayout(f_grid)
@@ -437,6 +478,7 @@ class AdminTrenParadasDialog(BaseMaximizedDialog):
 
         self.lbl_modo_form = QLabel("Modo: Crear nueva parada")
         self.lbl_modo_form.setStyleSheet("font-weight: bold; color: #1F497D;")
+        self.lbl_modo_form.setWordWrap(True)
         form_lay.addWidget(self.lbl_modo_form)
 
         btn_guardar = QPushButton("💾 Guardar Parada")
@@ -445,21 +487,15 @@ class AdminTrenParadasDialog(BaseMaximizedDialog):
 
         btn_nuevo = QPushButton("➕ Limpiar / Nueva Parada")
         btn_nuevo.setObjectName("btnSecondary")
-        btn_nuevo.clicked.connect(self._limpiar_formulario)
+        btn_nuevo.clicked.connect(lambda: self._limpiar_formulario(limpiar_seleccion=True))
         form_lay.addWidget(btn_nuevo)
-
-        self.btn_eliminar = QPushButton("🗑️ Eliminar Parada Seleccionada")
-        self.btn_eliminar.setObjectName("btnDanger")
-        self.btn_eliminar.setEnabled(False)
-        self.btn_eliminar.clicked.connect(self._eliminar_parada)
-        form_lay.addWidget(self.btn_eliminar)
 
         form_lay.addStretch()
 
         lbl_ayuda = QLabel(
             "Nota: Soporta libros Excel con múltiples hojas por ramal/régimen\n"
-            "(ej. Hab ASC/DES, Sab, DOM), matrices con múltiples trenes,\n"
-            "planillas TREN/ESTACION/HORA y búsqueda por abreviatura o sigla."
+            "(ej. Hab ASC/DES, Sab, DOM -> H/S/D), selección múltiple con Ctrl/Shift\n"
+            "y búsqueda o eliminación filtrada por tren, estación/sigla o itinerario."
         )
         lbl_ayuda.setWordWrap(True)
         lbl_ayuda.setStyleSheet("color: #666; font-size: 11px;")
@@ -555,20 +591,58 @@ class AdminTrenParadasDialog(BaseMaximizedDialog):
         self.combo_filtro_regimen.blockSignals(False)
         self.refrescar_tabla()
 
-    def refrescar_tabla(self) -> None:
+    def _filtros_actuales(self) -> Dict[str, Optional[str]]:
         nt = self.txt_filtro_tren.text().strip()
         est = self.txt_filtro_estacion.text().strip()
         itin = self.combo_filtro_itin.currentText().strip()
-        reg = self.combo_filtro_regimen.currentText().strip()
+        reg_data = self.combo_filtro_regimen.currentData()
+        reg = str(reg_data if reg_data is not None else self.combo_filtro_regimen.currentText()).strip()
+        return {
+            "nro_tren": nt or None,
+            "itinerario": None if itin in ("", "Todos", "Todas") else itin,
+            "estacion": est or None,
+            "regimen": None if reg in ("", "Todos", "Todas") else reg,
+        }
+
+    def _obtener_filas_seleccionadas(self) -> List[Dict[str, Any]]:
+        sel_model = self.tabla.selectionModel()
+        if not sel_model:
+            return []
+        filas_idx = sorted({idx.row() for idx in sel_model.selectedIndexes()})
+        return [self._datos_cache[r] for r in filas_idx if 0 <= r < len(self._datos_cache)]
+
+    def _actualizar_contador(self) -> None:
+        mostradas = len(self._datos_cache)
+        total_filt = getattr(self, "_total_filtrado", mostradas)
+        total_global = getattr(self, "_total_global", mostradas)
+        sel_cnt = len(self._obtener_filas_seleccionadas())
+        hay_filtro = any(self._filtros_actuales().values())
+
+        if mostradas < total_filt:
+            txt = f"Mostrando {mostradas} de {total_filt} paradas coincidentes (total en base: {total_global})"
+        elif hay_filtro:
+            txt = f"{total_filt} parada(s) coincidente(s) (total en base: {total_global})"
+        else:
+            txt = f"{total_global} paradas registradas"
+
+        if sel_cnt > 0:
+            txt += f" | {sel_cnt} seleccionada(s)"
+        self.lbl_contador.setText(txt)
+
+    def refrescar_tabla(self) -> None:
+        filtros = self._filtros_actuales()
+        self._total_filtrado = self.records_service.contar_paradas_tren_por_filtros(**filtros)
+        if any(filtros.values()):
+            self._total_global = self.records_service.contar_paradas_tren_por_filtros()
+        else:
+            self._total_global = self._total_filtrado
 
         self._datos_cache = self.records_service.listar_paradas_tren(
-            nro_tren=nt or None,
-            itinerario=itin if itin != "Todos" else None,
-            estacion=est or None,
-            regimen=reg if reg != "Todos" else None,
+            **filtros,
             limite=5000,
         )
 
+        self.tabla.blockSignals(True)
         self.tabla.setRowCount(len(self._datos_cache))
         for r, item in enumerate(self._datos_cache):
             self.tabla.setItem(r, 0, QTableWidgetItem(str(item["id"])))
@@ -578,33 +652,56 @@ class AdminTrenParadasDialog(BaseMaximizedDialog):
             self.tabla.setItem(r, 4, QTableWidgetItem(str(item.get("sigla") or "")))
             self.tabla.setItem(r, 5, QTableWidgetItem(str(item["hora_paso"])))
             self.tabla.setItem(r, 6, QTableWidgetItem(str(item.get("itinerario") or "")))
-            self.tabla.setItem(r, 7, QTableWidgetItem(str(item.get("regimen") or "LV")))
+            reg_lbl = str(
+                item.get("regimen_label")
+                or self.records_service.formatear_regimen_turno(item.get("regimen") or "H")
+            )
+            self.tabla.setItem(r, 7, QTableWidgetItem(reg_lbl))
+        self.tabla.blockSignals(False)
 
-        self.lbl_contador.setText(f"{len(self._datos_cache)} paradas mostradas")
+        self.btn_sel_todas.setEnabled(len(self._datos_cache) > 0)
+        self._on_seleccion_tabla()
+
+    def _seleccionar_visibles(self) -> None:
+        if self.tabla.rowCount() > 0:
+            self.tabla.selectAll()
 
     def _on_seleccion_tabla(self) -> None:
-        sel = self.tabla.selectionModel().selectedRows()
-        if not sel:
-            self._limpiar_formulario()
+        sels = self._obtener_filas_seleccionadas()
+        self._actualizar_contador()
+        if not sels:
+            self._limpiar_formulario(limpiar_seleccion=False)
             return
-        idx = sel[0].row()
-        if idx < 0 or idx >= len(self._datos_cache):
+        if len(sels) > 1:
+            self._limpiar_formulario(limpiar_seleccion=False)
+            self.lbl_modo_form.setText(f"Modo: {len(sels)} paradas seleccionadas (eliminación en lote)")
+            self.btn_eliminar.setEnabled(True)
+            self.btn_eliminar.setText(f"🗑️ Eliminar Seleccionadas ({len(sels)})")
             return
-        item = self._datos_cache[idx]
+
+        item = sels[0]
         self._parada_editando_id = int(item["id"])
         self.txt_nro_tren.setText(str(item["nro_tren"]))
         self.spin_orden.setValue(int(item.get("orden_parada") or 1))
         self.txt_estacion.setText(str(item["estacion"]))
         self.txt_hora_paso.setText(str(item["hora_paso"]))
         self.combo_itin.setCurrentText(str(item.get("itinerario") or ""))
-        reg = str(item.get("regimen") or "LV").strip()
-        idx_r = self.combo_regimen.findText(reg)
+        reg = self.records_service.normalizar_regimen_parada(item.get("regimen"), default="H")
+        idx_r = self.combo_regimen.findData(reg)
+        if idx_r < 0:
+            idx_r = self.combo_regimen.findText(reg)
         if idx_r >= 0:
             self.combo_regimen.setCurrentIndex(idx_r)
         self.lbl_modo_form.setText(f"Modo: Editando parada ID #{self._parada_editando_id}")
         self.btn_eliminar.setEnabled(True)
+        self.btn_eliminar.setText("🗑️ Eliminar Seleccionada (1)")
 
-    def _limpiar_formulario(self) -> None:
+    def _limpiar_formulario(self, limpiar_seleccion: bool = True) -> None:
+        if limpiar_seleccion and self.tabla.selectionModel() is not None:
+            self.tabla.blockSignals(True)
+            self.tabla.clearSelection()
+            self.tabla.blockSignals(False)
+            self._actualizar_contador()
         self._parada_editando_id = None
         if not self.txt_filtro_tren.text().strip():
             self.txt_nro_tren.clear()
@@ -615,15 +712,19 @@ class AdminTrenParadasDialog(BaseMaximizedDialog):
         self.txt_hora_paso.clear()
         self.lbl_modo_form.setText("Modo: Crear nueva parada")
         self.btn_eliminar.setEnabled(False)
+        self.btn_eliminar.setText("🗑️ Eliminar Seleccionadas")
 
     def _guardar_parada(self) -> None:
+        reg_val = self.combo_regimen.currentData() or self.records_service.normalizar_regimen_parada(
+            self.combo_regimen.currentText(), default="H"
+        )
         datos = {
             "nro_tren": self.txt_nro_tren.text().strip(),
             "orden_parada": self.spin_orden.value(),
             "estacion": self.txt_estacion.text().strip(),
             "hora_paso": self.txt_hora_paso.text().strip(),
             "itinerario": self.combo_itin.currentText().strip(),
-            "regimen": self.combo_regimen.currentText().strip(),
+            "regimen": str(reg_val).strip(),
         }
         try:
             win_usr = obtener_usuario_windows()
@@ -637,32 +738,173 @@ class AdminTrenParadasDialog(BaseMaximizedDialog):
                     datos, user_id=uid, windows_user=win_usr
                 )
             self._refrescar_combos_itinerarios()
-            self._limpiar_formulario()
+            self._limpiar_formulario(limpiar_seleccion=False)
             self.refrescar_tabla()
         except Exception as e:
             QMessageBox.warning(self, "Validación", str(e))
 
-    def _eliminar_parada(self) -> None:
-        if self._parada_editando_id is None:
+    def _eliminar_paradas_seleccionadas(self) -> None:
+        sels = self._obtener_filas_seleccionadas()
+        if not sels:
+            QMessageBox.information(
+                self, "Selección", "Seleccione al menos una parada de la tabla para eliminar."
+            )
             return
-        resp = QMessageBox.question(
+
+        if len(sels) == 1:
+            p0 = sels[0]
+            msg = (
+                f"¿Está seguro que desea eliminar la parada ID #{p0['id']} "
+                f"(Tren {p0['nro_tren']} - {p0['estacion']} {p0['hora_paso']})?"
+            )
+            resp = QMessageBox.question(
+                self,
+                "Confirmar Eliminación",
+                msg,
+                QMessageBox.Yes | QMessageBox.No,
+            )
+        else:
+            muestra = ", ".join(f"Tren {x['nro_tren']} ({x['estacion']})" for x in sels[:6])
+            if len(sels) > 6:
+                muestra += f", ... (+{len(sels) - 6} más)"
+            resp = QMessageBox.warning(
+                self,
+                "Confirmar Eliminación Múltiple",
+                (
+                    f"¿Está seguro que desea eliminar permanentemente las {len(sels)} paradas seleccionadas?\n\n"
+                    f"{muestra}\n\nEsta acción no se puede deshacer."
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+            )
+        if resp != QMessageBox.Yes:
+            return
+
+        try:
+            win_usr = obtener_usuario_windows()
+            uid = self.usuario_actual.get("id")
+            if len(sels) == 1:
+                self.records_service.eliminar_parada_tren(
+                    int(sels[0]["id"]),
+                    user_id=uid,
+                    windows_user=win_usr,
+                )
+            else:
+                eliminados = self.records_service.eliminar_paradas_tren_lote(
+                    [int(x["id"]) for x in sels],
+                    user_id=uid,
+                    windows_user=win_usr,
+                )
+                QMessageBox.information(
+                    self,
+                    "Eliminación Completada",
+                    f"Se eliminaron {eliminados} paradas seleccionadas correctamente.",
+                )
+            self._refrescar_combos_itinerarios()
+            self._limpiar_formulario(limpiar_seleccion=False)
+            self.refrescar_tabla()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
+    def _eliminar_parada(self) -> None:
+        """Alias compatible hacia atrás que delega en la eliminación simple/múltiple."""
+        self._eliminar_paradas_seleccionadas()
+
+    def _eliminar_por_filtros(self) -> None:
+        filtros = self._filtros_actuales()
+        if not any(filtros.values()):
+            QMessageBox.information(
+                self,
+                "Filtro Requerido",
+                "No hay filtros aplicados (N° Tren, Estación/Sigla, Itinerario o Régimen).\n\n"
+                "Aplique al menos un filtro o utilice el botón '🗑️ Eliminar Todas' si desea vaciar todas las paradas.",
+            )
+            return
+
+        total = self.records_service.contar_paradas_tren_por_filtros(**filtros)
+        if total == 0:
+            QMessageBox.information(
+                self,
+                "Sin Paradas",
+                "No existen paradas que coincidan con los filtros seleccionados para eliminar.",
+            )
+            return
+
+        detalles: List[str] = []
+        if filtros["nro_tren"]:
+            detalles.append(f"• N° Tren: {filtros['nro_tren']}")
+        if filtros["estacion"]:
+            detalles.append(f"• Estación / Sigla: {filtros['estacion']}")
+        if filtros["itinerario"]:
+            detalles.append(f"• Itinerario: {filtros['itinerario']}")
+        if filtros["regimen"]:
+            detalles.append(f"• Régimen: {self.records_service.formatear_regimen_turno(filtros['regimen'])}")
+
+        resp = QMessageBox.warning(
             self,
-            "Confirmar Eliminación",
-            f"¿Está seguro que desea eliminar la parada ID #{self._parada_editando_id}?",
+            "Eliminar Paradas por Filtro",
+            (
+                f"Se eliminarán permanentemente {total} parada(s) que coinciden con los filtros aplicados:\n\n"
+                f"{chr(10).join(detalles)}\n\nEsta acción no se puede deshacer. ¿Desea continuar?"
+            ),
             QMessageBox.Yes | QMessageBox.No,
         )
         if resp != QMessageBox.Yes:
             return
+
         try:
-            self.records_service.eliminar_parada_tren(
-                self._parada_editando_id,
+            eliminados = self.records_service.eliminar_paradas_tren_por_filtros(
+                user_id=self.usuario_actual.get("id"),
+                windows_user=obtener_usuario_windows(),
+                **filtros,
+            )
+            self._refrescar_combos_itinerarios()
+            self._limpiar_formulario(limpiar_seleccion=False)
+            self.refrescar_tabla()
+            QMessageBox.information(
+                self,
+                "Eliminación Completada",
+                f"Se eliminaron {eliminados} parada(s) según los filtros seleccionados.",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Error al Eliminar", f"No se pudieron eliminar las paradas filtradas:\n{e}")
+
+    def _eliminar_todas_paradas(self) -> None:
+        total = self.records_service.contar_paradas_tren_por_filtros()
+        if total == 0:
+            QMessageBox.information(
+                self,
+                "Sin Paradas",
+                "No hay paradas de tren registradas para eliminar.",
+            )
+            return
+
+        resp = QMessageBox.warning(
+            self,
+            "Eliminar Todas las Paradas",
+            (
+                f"¿Está seguro que desea eliminar permanentemente TODAS las {total} paradas de tren registradas "
+                f"(todos los trenes, itinerarios y regímenes)?\n\nEsta acción no se puede deshacer."
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if resp != QMessageBox.Yes:
+            return
+
+        try:
+            eliminados = self.records_service.eliminar_todas_paradas_tren(
                 user_id=self.usuario_actual.get("id"),
                 windows_user=obtener_usuario_windows(),
             )
-            self._limpiar_formulario()
+            self._refrescar_combos_itinerarios()
+            self._limpiar_formulario(limpiar_seleccion=False)
             self.refrescar_tabla()
+            QMessageBox.information(
+                self,
+                "Eliminación Completada",
+                f"Se eliminaron todas las {eliminados} paradas de tren registradas.",
+            )
         except Exception as e:
-            QMessageBox.critical(self, "Error", str(e))
+            QMessageBox.critical(self, "Error al Eliminar", f"No se pudieron eliminar todas las paradas:\n{e}")
 
     def _abrir_catalogo_estaciones(self) -> None:
         dlg = AdminEstacionesDialog(

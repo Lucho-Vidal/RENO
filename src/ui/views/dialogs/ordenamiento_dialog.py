@@ -161,7 +161,9 @@ class OrdenamientoDialog(BaseMaximizedDialog):
 
         lay_cab.addWidget(QLabel("Régimen:"), 2, 3)
         self.combo_regimen = QComboBox()
-        self.combo_regimen.addItems(["LV", "S", "D"])
+        self.combo_regimen.addItem("H - Hábil", "H")
+        self.combo_regimen.addItem("S - Sábado", "S")
+        self.combo_regimen.addItem("D - Domingo / Feriado", "D")
         self.combo_regimen.currentIndexChanged.connect(self._on_contexto_paradas_changed)
         lay_cab.addWidget(self.combo_regimen, 2, 4)
 
@@ -416,7 +418,11 @@ class OrdenamientoDialog(BaseMaximizedDialog):
             QMessageBox.information(self, "Cargar Turno", "Ingrese o seleccione un código de Turno primero.")
             return
         itin = self.combo_itinerario.currentText().strip()
-        reg = self.combo_regimen.currentText().strip() if hasattr(self, "combo_regimen") else ""
+        reg = (
+            str(self.combo_regimen.currentData() or self.combo_regimen.currentText()).strip()
+            if hasattr(self, "combo_regimen")
+            else ""
+        )
         t_info = self.records_service.obtener_turno_por_codigo(
             cod_turno,
             itinerario=itin or None,
@@ -468,7 +474,11 @@ class OrdenamientoDialog(BaseMaximizedDialog):
             return
 
         itin = self.combo_itinerario.currentText().strip()
-        reg = self.combo_regimen.currentText().strip() if hasattr(self, "combo_regimen") else None
+        reg = (
+            str(self.combo_regimen.currentData() or self.combo_regimen.currentText()).strip()
+            if hasattr(self, "combo_regimen")
+            else None
+        )
         paradas = self.records_service.obtener_estaciones_y_horarios_por_tren(
             nt,
             itinerario=itin or None,
@@ -687,8 +697,10 @@ class OrdenamientoDialog(BaseMaximizedDialog):
         self.txt_nombre.setText(str(o.get("nombre_personal") or ""))
         self.combo_itinerario.setCurrentText(str(o.get("itinerario") or ""))
         self.combo_turno.setCurrentText(str(o.get("ciclo_o_turno") or ""))
-        reg = str(o.get("regimen") or "LV")
-        idx_r = self.combo_regimen.findText(reg)
+        reg = self.records_service.normalizar_regimen_parada(o.get("regimen"), default="H")
+        idx_r = self.combo_regimen.findData(reg)
+        if idx_r < 0:
+            idx_r = self.combo_regimen.findText(reg)
         if idx_r >= 0:
             self.combo_regimen.setCurrentIndex(idx_r)
 
@@ -705,6 +717,9 @@ class OrdenamientoDialog(BaseMaximizedDialog):
         self._sincronizar_ediciones_celdas()
         win_usr = self.txt_usuario_windows.text().strip() or obtener_usuario_windows()
 
+        reg_val = self.combo_regimen.currentData() or self.records_service.normalizar_regimen_parada(
+            self.combo_regimen.currentText(), default="H"
+        )
         datos = {
             "nro_orden": self.txt_nro_orden.text().strip(),
             "fecha_emision": self.date_emision.date().toString("dd/MM/yyyy"),
@@ -714,7 +729,7 @@ class OrdenamientoDialog(BaseMaximizedDialog):
             "deposito": self.combo_deposito.currentText().strip().upper(),
             "itinerario": self.combo_itinerario.currentText().strip(),
             "ciclo_o_turno": self.combo_turno.currentText().strip(),
-            "regimen": self.combo_regimen.currentText().strip(),
+            "regimen": str(reg_val).strip(),
             "motivo_orden": self.txt_motivo.text().strip(),
             "observacion_pie": self.txt_obs_pie.toPlainText().strip(),
             "ref_pct": self.combo_ref_pct.currentText().strip(),

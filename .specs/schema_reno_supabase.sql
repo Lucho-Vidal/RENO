@@ -271,13 +271,18 @@ CREATE TABLE IF NOT EXISTS reno_tren_paradas (
     id BIGINT PRIMARY KEY,
     nro_tren TEXT NOT NULL,
     itinerario TEXT NOT NULL DEFAULT '',
-    regimen TEXT NOT NULL DEFAULT 'LV',
+    regimen TEXT NOT NULL DEFAULT 'H',
     orden_parada INTEGER NOT NULL DEFAULT 1,
     estacion TEXT NOT NULL,
     hora_paso TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE reno_tren_paradas ALTER COLUMN regimen SET DEFAULT 'H';
+UPDATE reno_tren_paradas
+SET regimen = 'H'
+WHERE UPPER(TRIM(COALESCE(regimen, ''))) IN ('LV', 'L-V', 'LAV', 'L A V', 'HABIL', 'HÁBIL', 'DIA HABIL', 'DÍA HÁBIL', 'LUNES A VIERNES');
 
 -- 2.19 Ordenamientos Operativos
 CREATE TABLE IF NOT EXISTS reno_ordenamientos (
@@ -290,7 +295,7 @@ CREATE TABLE IF NOT EXISTS reno_ordenamientos (
     deposito TEXT NOT NULL DEFAULT 'PC',
     itinerario TEXT NOT NULL DEFAULT '',
     ciclo_o_turno TEXT NOT NULL DEFAULT '',
-    regimen TEXT NOT NULL DEFAULT 'LV',
+    regimen TEXT NOT NULL DEFAULT 'H',
     motivo_orden TEXT NOT NULL DEFAULT '',
     observacion_pie TEXT NOT NULL DEFAULT '',
     ref_pct TEXT NOT NULL DEFAULT '',
@@ -303,6 +308,11 @@ CREATE TABLE IF NOT EXISTS reno_ordenamientos (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at TIMESTAMPTZ
 );
+
+ALTER TABLE reno_ordenamientos ALTER COLUMN regimen SET DEFAULT 'H';
+UPDATE reno_ordenamientos
+SET regimen = 'H'
+WHERE UPPER(TRIM(COALESCE(regimen, ''))) IN ('LV', 'L-V', 'LAV', 'L A V', 'HABIL', 'HÁBIL', 'DIA HABIL', 'DÍA HÁBIL', 'LUNES A VIERNES');
 
 -- 2.20 Tramos de Ordenamientos
 CREATE TABLE IF NOT EXISTS reno_ordenamiento_tramos (

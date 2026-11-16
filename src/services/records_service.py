@@ -2281,7 +2281,7 @@ class RecordsService:
         if not raw:
             return default
         t = normalizar_texto_estacion(raw).upper()
-        if t in ("TODOS", "TODAS", "ALL", "CUALQUIERA", "SIN DISTINCION"):
+        if t in ("TODOS", "TODAS", "ALL", "CUALQUIERA", "SIN DISTINCION") or t.startswith("TODOS"):
             return "TODOS"
         if t in ("H", "HABIL", "LV", "LAV", "L-V", "L A V") or "HABIL" in t or "LUNES A VIERNES" in t:
             return "H"
@@ -2292,17 +2292,39 @@ class RecordsService:
         return default
 
     @staticmethod
+    def normalizar_regimen_parada(valor: Any, default: str = "H") -> str:
+        """Normaliza régimen de paradas/ordenamientos convirtiendo alias de Hábil (LV/L-V/HABIL) a 'H'."""
+        raw = str(valor or "").strip()
+        if not raw:
+            return default
+        up = raw.upper()
+        if up in ("H", "S", "D", "TODOS"):
+            return up
+        t = normalizar_texto_estacion(raw).upper()
+        if t in ("H", "HABIL", "LV", "LAV", "L-V", "L A V") or "HABIL" in t or "LUNES A VIERNES" in t:
+            return "H"
+        if t in ("S", "SAB", "SABADO") or t.startswith("SAB") or "SABADO" in t:
+            return "S"
+        if t in ("D", "DOM", "DOMINGO", "DF", "DOM / FERIADO") or t.startswith("DOM") or "DOMINGO" in t or "FERIAD" in t:
+            return "D"
+        if t in ("TODOS", "TODAS"):
+            return "TODOS"
+        return up
+
+    @staticmethod
     def formatear_regimen_turno(regimen: Any) -> str:
         """Devuelve representación legible para UI y reportes de H/S/D/TODOS."""
-        reg = str(regimen or "TODOS").strip().upper()
-        mapping = {
-            "H": "H (Hábil)",
-            "S": "S (Sábado)",
-            "D": "D (Domingo)",
-            "TODOS": "Todos",
-            "": "Todos",
-        }
-        return mapping.get(reg, reg)
+        raw = str(regimen or "TODOS").strip()
+        t = normalizar_texto_estacion(raw).upper()
+        if t in ("H", "HABIL", "LV", "LAV", "L-V", "L A V") or "HABIL" in t or "LUNES A VIERNES" in t:
+            return "H (Hábil)"
+        if t in ("S", "SAB", "SABADO") or t.startswith("SAB") or "SABADO" in t:
+            return "S (Sábado)"
+        if t in ("D", "DOM", "DOMINGO", "DF", "DOM / FERIADO") or t.startswith("DOM") or "DOMINGO" in t or "FERIAD" in t:
+            return "D (Domingo)"
+        if t in ("", "TODOS", "TODAS"):
+            return "Todos"
+        return raw.upper() if raw.upper() in ("DIAGRAMA_6D", "UNIPERSONAL", "PROGRAMA", "FRANQUERO") else raw
 
     @staticmethod
     def _formatear_hora_celda(val: Any) -> str:
@@ -3923,18 +3945,74 @@ class RecordsService:
         return ""
 
     @staticmethod
-    def _inferir_regimen_hoja(sheet_title: str, default_reg: str = "LV") -> str:
+    def _inferir_regimen_hoja(sheet_title: str, default_reg: str = "H") -> str:
         t = normalizar_texto_estacion(sheet_title)
         if not t:
             return default_reg
-        tokens = set(re.split(r"[\s_\-/]+", t))
-        if "sab" in t or "sabado" in tokens:
+        tokens = [tok for tok in re.split(r"[\s_\-/]+", t) if tok]
+        token_set = set(tokens)
+        if "sab" in t or "sabado" in token_set or "s" in token_set or re.match(r"^s(?:\s|_|-|$)", t):
             return "S"
-        if "dom" in t or "feriad" in t or "df" in tokens:
+        if "dom" in t or "feriad" in t or "df" in token_set or "d" in token_set or re.match(r"^d(?:\s|_|-|$)", t):
             return "D"
-        if "hab" in t or "lun" in t or "lv" in tokens:
-            return "LV"
+        if "hab" in t or "lun" in t or "lv" in token_set or "lav" in token_set or "h" in token_set or re.match(r"^h(?:\s|_|-|$)", t):
+            return "H"
         return default_reg
+
+    def _enqueue_sync_delete_lote(
+        self,
+        conn: sqlite3.Connection,
+        tabla: str,
+        ids: Sequence[int],
+    ) -> None:
+        if not ids:
+            return
+        ahora = self.db.now()
+        rows_sync = [
+            (tabla, str(int(rid)), "DELETE", json.dumps({"id": int(rid)}, ensure_ascii=False), ahora)
+            for rid in ids
+        ]
+        conn.executemany(
+            """INSERT INTO sync_outbox (tabla, registro_pk, operacion, payload_json, creado_en)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(tabla, registro_pk) DO UPDATE SET
+                   operacion = excluded.operacion,
+                   payload_json = excluded.payload_json,
+                   creado_en = excluded.creado_en""",
+            rows_sync,
+        )
+
+    def _build_paradas_where(
+        self,
+        nro_tren: Optional[str] = None,
+        itinerario: Optional[str] = None,
+        regimen: Optional[str] = None,
+    ) -> Tuple[str, List[Any]]:
+        clauses: List[str] = ["1=1"]
+        params: List[Any] = []
+        if nro_tren and str(nro_tren).strip():
+            nt = str(nro_tren).strip()
+            clauses.append("(nro_tren = ? OR nro_tren LIKE ?)")
+            params.extend([nt, f"%{nt}%"])
+        if itinerario and str(itinerario).strip() not in ("", "Todos", "Todas"):
+            clauses.append("itinerario = ?")
+            params.append(str(itinerario).strip())
+        if regimen and str(regimen).strip() not in ("", "Todos", "Todas"):
+            reg_norm = self.normalizar_regimen_parada(regimen)
+            if reg_norm == "H":
+                clauses.append(
+                    "UPPER(TRIM(COALESCE(regimen, ''))) IN ('', 'H', 'LV', 'L-V', 'LAV', 'L A V', 'HABIL', 'HÁBIL', 'DIA HABIL', 'DÍA HÁBIL', 'LUNES A VIERNES')"
+                )
+            elif reg_norm == "S":
+                clauses.append("UPPER(TRIM(COALESCE(regimen, ''))) IN ('S', 'SAB', 'SABADO', 'SÁBADO')")
+            elif reg_norm == "D":
+                clauses.append(
+                    "UPPER(TRIM(COALESCE(regimen, ''))) IN ('D', 'DOM', 'DOMINGO', 'DF', 'FERIADO', 'DOM / FERIADO')"
+                )
+            else:
+                clauses.append("UPPER(TRIM(COALESCE(regimen, ''))) = UPPER(TRIM(?))")
+                params.append(reg_norm)
+        return " AND ".join(clauses), params
 
     def listar_paradas_tren(
         self,
@@ -3945,36 +4023,27 @@ class RecordsService:
         limite: int = 5000,
     ) -> List[Dict[str, Any]]:
         """Lista las estaciones intermedias y horarios de paso por tren con filtro por nombre o sigla."""
-        query = """
+        where_sql, params = self._build_paradas_where(
+            nro_tren=nro_tren,
+            itinerario=itinerario,
+            regimen=regimen,
+        )
+        query = f"""
             SELECT id, nro_tren, itinerario, regimen, orden_parada, estacion, hora_paso, created_at, updated_at
             FROM tren_paradas
-            WHERE 1=1
-        """
-        params: List[Any] = []
-        if nro_tren and str(nro_tren).strip():
-            nt = str(nro_tren).strip()
-            query += " AND (nro_tren = ? OR nro_tren LIKE ?)"
-            params.extend([nt, f"%{nt}%"])
-        if itinerario and str(itinerario).strip() not in ("", "Todos", "Todas"):
-            query += " AND itinerario = ?"
-            params.append(str(itinerario).strip())
-        if regimen and str(regimen).strip() not in ("", "Todos", "Todas"):
-            query += " AND UPPER(TRIM(regimen)) = UPPER(TRIM(?))"
-            params.append(str(regimen).strip())
-
-        query += """
+            WHERE {where_sql}
             ORDER BY
                 CASE WHEN TRIM(nro_tren) GLOB '[0-9]*' THEN CAST(TRIM(nro_tren) AS INTEGER) ELSE 999999999 END ASC,
                 nro_tren ASC,
                 itinerario ASC,
-                CASE UPPER(TRIM(regimen)) WHEN 'LV' THEN 1 WHEN 'S' THEN 2 WHEN 'D' THEN 3 ELSE 4 END ASC,
+                CASE UPPER(TRIM(regimen)) WHEN 'H' THEN 1 WHEN 'LV' THEN 1 WHEN 'S' THEN 2 WHEN 'D' THEN 3 ELSE 4 END ASC,
                 orden_parada ASC,
                 hora_paso ASC
         """
         est_filtro = str(estacion or "").strip()
-        if not est_filtro:
+        if not est_filtro and limite is not None:
             query += " LIMIT ?"
-            params.append(limite)
+            params.append(int(limite))
 
         with self.db.read_connection() as conn:
             idx_est = self._obtener_indice_estaciones(conn)
@@ -3986,11 +4055,36 @@ class RecordsService:
             est_txt = str(item.get("estacion") or "").strip()
             if est_filtro and not idx_est.coincide_filtro_estacion(est_txt, est_filtro):
                 continue
+            reg_norm = self.normalizar_regimen_parada(item.get("regimen"), default="H")
+            item["regimen"] = reg_norm
+            item["regimen_label"] = self.formatear_regimen_turno(reg_norm)
             item["sigla"] = idx_est.obtener_sigla_estacion(est_txt)
             resultado.append(item)
-            if len(resultado) >= limite:
+            if limite is not None and len(resultado) >= limite:
                 break
         return resultado
+
+    def contar_paradas_tren_por_filtros(
+        self,
+        nro_tren: Optional[str] = None,
+        itinerario: Optional[str] = None,
+        estacion: Optional[str] = None,
+        regimen: Optional[str] = None,
+    ) -> int:
+        """Devuelve la cantidad exacta en base de paradas por tren que coinciden con los filtros activos."""
+        where_sql, params = self._build_paradas_where(
+            nro_tren=nro_tren,
+            itinerario=itinerario,
+            regimen=regimen,
+        )
+        est_filtro = str(estacion or "").strip()
+        with self.db.read_connection() as conn:
+            if not est_filtro:
+                row = conn.execute(f"SELECT COUNT(*) FROM tren_paradas WHERE {where_sql}", params).fetchone()
+                return int(row[0]) if row else 0
+            idx_est = self._obtener_indice_estaciones(conn)
+            rows = conn.execute(f"SELECT estacion FROM tren_paradas WHERE {where_sql}", params).fetchall()
+            return sum(1 for r in rows if idx_est.coincide_filtro_estacion(str(r[0] or "").strip(), est_filtro))
 
     def crear_parada_tren(
         self,
@@ -4010,7 +4104,7 @@ class RecordsService:
             raise ValueError("La hora de paso es obligatoria.")
 
         itinerario = str(datos.get("itinerario") or "").strip()
-        regimen = str(datos.get("regimen") or "LV").strip()
+        regimen = self.normalizar_regimen_parada(datos.get("regimen"), default="H")
         try:
             orden_parada = int(datos.get("orden_parada") or 1)
         except (ValueError, TypeError):
@@ -4043,7 +4137,7 @@ class RecordsService:
             raise ValueError("N° de Tren, Estación y Hora de Paso son obligatorios.")
 
         itinerario = str(datos.get("itinerario") or "").strip()
-        regimen = str(datos.get("regimen") or "LV").strip()
+        regimen = self.normalizar_regimen_parada(datos.get("regimen"), default="H")
         try:
             orden_parada = int(datos.get("orden_parada") or 1)
         except (ValueError, TypeError):
@@ -4078,6 +4172,134 @@ class RecordsService:
             conn.execute("DELETE FROM tren_paradas WHERE id = ?", (parada_id,))
             self._audit(conn, user_id, windows_user, "eliminar", "tren_parada", parada_id, dict(before), None)
             self._enqueue_sync(conn, "tren_paradas", parada_id, "DELETE", {"id": parada_id})
+
+    def eliminar_paradas_tren_lote(
+        self,
+        parada_ids: Sequence[int],
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> int:
+        """Elimina permanentemente en lote una selección de paradas de tren."""
+        ids_clean = list(dict.fromkeys(int(pid) for pid in parada_ids if pid is not None))
+        if not ids_clean:
+            return 0
+
+        eliminados = 0
+        ejemplos: List[str] = []
+        with self.db.write_transaction() as conn:
+            for i in range(0, len(ids_clean), 400):
+                chunk = ids_clean[i : i + 400]
+                ph = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT id, nro_tren, estacion, itinerario, regimen FROM tren_paradas WHERE id IN ({ph})",
+                    chunk,
+                ).fetchall()
+                if not rows:
+                    continue
+                found_ids = [int(r[0]) for r in rows]
+                for r in rows:
+                    if len(ejemplos) < 25:
+                        ejemplos.append(f"Tren {r[1]} - {r[2]} ({r[4]}/{r[3]})")
+                ph_found = ",".join("?" for _ in found_ids)
+                conn.execute(f"DELETE FROM tren_paradas WHERE id IN ({ph_found})", found_ids)
+                self._enqueue_sync_delete_lote(conn, "tren_paradas", found_ids)
+                eliminados += len(found_ids)
+
+            if eliminados > 0:
+                self._audit(
+                    conn,
+                    user_id,
+                    windows_user,
+                    "eliminar_lote",
+                    "tren_parada",
+                    None,
+                    {"eliminados": eliminados, "ejemplos": ejemplos},
+                    None,
+                )
+        return eliminados
+
+    def eliminar_paradas_tren_por_filtros(
+        self,
+        nro_tren: Optional[str] = None,
+        itinerario: Optional[str] = None,
+        estacion: Optional[str] = None,
+        regimen: Optional[str] = None,
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> int:
+        """Elimina permanentemente todas las paradas que coincidan con los filtros indicados."""
+        where_sql, params = self._build_paradas_where(
+            nro_tren=nro_tren,
+            itinerario=itinerario,
+            regimen=regimen,
+        )
+        est_filtro = str(estacion or "").strip()
+        with self.db.write_transaction() as conn:
+            rows = conn.execute(
+                f"SELECT id, nro_tren, estacion, itinerario, regimen FROM tren_paradas WHERE {where_sql}",
+                params,
+            ).fetchall()
+            if est_filtro:
+                idx_est = self._obtener_indice_estaciones(conn)
+                rows = [
+                    r for r in rows
+                    if idx_est.coincide_filtro_estacion(str(r[2] or "").strip(), est_filtro)
+                ]
+            if not rows:
+                return 0
+
+            ids = [int(r[0]) for r in rows]
+            ejemplos = [f"Tren {r[1]} - {r[2]} ({r[4]}/{r[3]})" for r in rows[:25]]
+            for i in range(0, len(ids), 400):
+                chunk = ids[i : i + 400]
+                ph = ",".join("?" for _ in chunk)
+                conn.execute(f"DELETE FROM tren_paradas WHERE id IN ({ph})", chunk)
+                self._enqueue_sync_delete_lote(conn, "tren_paradas", chunk)
+
+            self._audit(
+                conn,
+                user_id,
+                windows_user,
+                "eliminar_por_filtros",
+                "tren_parada",
+                None,
+                {
+                    "filtros": {
+                        "nro_tren": nro_tren,
+                        "itinerario": itinerario,
+                        "estacion": estacion,
+                        "regimen": regimen,
+                    },
+                    "eliminados": len(ids),
+                    "ejemplos": ejemplos,
+                },
+                None,
+            )
+            return len(ids)
+
+    def eliminar_todas_paradas_tren(
+        self,
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> int:
+        """Elimina permanentemente todas las paradas registradas en tren_paradas."""
+        with self.db.write_transaction() as conn:
+            ids = [int(r[0]) for r in conn.execute("SELECT id FROM tren_paradas").fetchall()]
+            if not ids:
+                return 0
+            conn.execute("DELETE FROM tren_paradas")
+            self._enqueue_sync_delete_lote(conn, "tren_paradas", ids)
+            self._audit(
+                conn,
+                user_id,
+                windows_user,
+                "eliminar_todas",
+                "tren_parada",
+                None,
+                {"eliminados": len(ids)},
+                None,
+            )
+            return len(ids)
 
     def importar_paradas_tren_excel(
         self,
@@ -4234,7 +4456,7 @@ class RecordsService:
                 vio_catalogo_estaciones = True
                 continue
 
-            sheet_reg_default = self._inferir_regimen_hoja(ws.title, default_reg="LV")
+            sheet_reg_default = self._inferir_regimen_hoja(ws.title, default_reg="H")
             sheet_itin_default = itin_fallback_base or str(ws.title or "").strip()
 
             if best_hdr and best_hdr[1] == "matrix":
@@ -4317,7 +4539,7 @@ class RecordsService:
                     cell_itin = str(ws.cell(r_idx, c_itin).value or "").strip() if c_itin else ""
                     itin = cell_itin or sheet_itin_default
                     cell_reg = str(ws.cell(r_idx, c_reg).value or "").strip() if c_reg else ""
-                    reg = cell_reg or sheet_reg_default
+                    reg = self.normalizar_regimen_parada(cell_reg or sheet_reg_default, default=sheet_reg_default)
                     ord_key = (nt, itin, reg)
                     if c_orden and ws.cell(r_idx, c_orden).value is not None:
                         try:
@@ -4336,7 +4558,7 @@ class RecordsService:
                     cell_itin = str(ws.cell(r_idx, c_itin).value or "").strip() if c_itin else ""
                     itin = cell_itin or sheet_itin_default
                     cell_reg = str(ws.cell(r_idx, c_reg).value or "").strip() if c_reg else ""
-                    reg = cell_reg or sheet_reg_default
+                    reg = self.normalizar_regimen_parada(cell_reg or sheet_reg_default, default=sheet_reg_default)
                     orig = re.sub(r"\s+", " ", str(ws.cell(r_idx, c_origen).value or "")).strip()
                     hs = _parse_hr(ws.cell(r_idx, c_h_sal).value)
                     dest = re.sub(r"\s+", " ", str(ws.cell(r_idx, c_destino).value or "")).strip()
@@ -4387,18 +4609,19 @@ class RecordsService:
                 k = (
                     str(r["nro_tren"] or "").strip(),
                     str(r["itinerario"] or "").strip().upper(),
-                    str(r["regimen"] or "LV").strip().upper(),
+                    self.normalizar_regimen_parada(r["regimen"], default="H"),
                     str(r["hora_paso"] or "").strip(),
                 )
                 existentes.setdefault(k, []).append(str(r["estacion"] or "").strip())
 
             for nt, itin, reg, ord_num, est, hr in registros_a_insertar:
-                k = (nt, itin.upper(), reg.upper(), hr)
+                reg_norm = self.normalizar_regimen_parada(reg, default="H")
+                k = (nt, itin.upper(), reg_norm, hr)
                 ests_existentes = existentes.get(k, [])
                 if any(e.upper() == est.upper() or idx_est.estaciones_equivalentes(e, est) for e in ests_existentes):
                     continue
                 existentes.setdefault(k, []).append(est)
-                to_insert.append((nt, itin, reg, ord_num, est, hr))
+                to_insert.append((nt, itin, reg_norm, ord_num, est, hr))
 
             if to_insert:
                 conn.executemany(
@@ -4438,8 +4661,9 @@ class RecordsService:
 
         itin_clean = str(itinerario or "").strip()
         filtrar_itin = bool(itin_clean and itin_clean not in ("Todos", "Todas"))
-        reg_clean = str(regimen or "").strip().upper()
-        filtrar_reg = bool(reg_clean and reg_clean not in ("TODOS", "TODAS"))
+        reg_raw = str(regimen or "").strip().upper()
+        filtrar_reg = bool(reg_raw and reg_raw not in ("TODOS", "TODAS"))
+        reg_clean = self.normalizar_regimen_parada(reg_raw, default="H") if filtrar_reg else ""
 
         def _min_of_day(hhmm: str) -> Optional[int]:
             parts = str(hhmm or "").strip().split(":")
@@ -4475,11 +4699,13 @@ class RecordsService:
                     paradas_sub = coinciden_itin
 
             if paradas_sub:
-                regimenes_presentes = [str(r.get("regimen") or "LV").strip().upper() for r in paradas_sub]
+                regimenes_presentes = [
+                    self.normalizar_regimen_parada(r.get("regimen"), default="H") for r in paradas_sub
+                ]
                 if filtrar_reg and reg_clean in regimenes_presentes:
                     reg_elegido = reg_clean
                 else:
-                    for prio in ("LV", "S", "D"):
+                    for prio in ("H", "S", "D"):
                         if prio in regimenes_presentes:
                             reg_elegido = prio
                             break
@@ -4487,7 +4713,8 @@ class RecordsService:
                         reg_elegido = regimenes_presentes[0]
 
                 paradas_sub = [
-                    r for r in paradas_sub if str(r.get("regimen") or "LV").strip().upper() == reg_elegido
+                    r for r in paradas_sub
+                    if self.normalizar_regimen_parada(r.get("regimen"), default="H") == reg_elegido
                 ]
 
             ref_min: Optional[int] = None
@@ -4647,7 +4874,7 @@ class RecordsService:
                     deposito,
                     str(datos.get("itinerario") or "").strip(),
                     str(datos.get("ciclo_o_turno") or "").strip(),
-                    str(datos.get("regimen") or "LV").strip(),
+                    self.normalizar_regimen_parada(datos.get("regimen"), default="H"),
                     str(datos.get("motivo_orden") or "").strip(),
                     str(datos.get("observacion_pie") or "").strip(),
                     str(datos.get("ref_pct") or "").strip(),
@@ -4727,7 +4954,7 @@ class RecordsService:
                     deposito,
                     str(datos.get("itinerario") or "").strip(),
                     str(datos.get("ciclo_o_turno") or "").strip(),
-                    str(datos.get("regimen") or "LV").strip(),
+                    self.normalizar_regimen_parada(datos.get("regimen"), default="H"),
                     str(datos.get("motivo_orden") or "").strip(),
                     str(datos.get("observacion_pie") or "").strip(),
                     str(datos.get("ref_pct") or "").strip(),
@@ -4797,6 +5024,7 @@ class RecordsService:
             if not row:
                 return None
             res = dict(row)
+            res["regimen"] = self.normalizar_regimen_parada(res.get("regimen"), default="H")
             tramos = conn.execute(
                 "SELECT * FROM ordenamiento_tramos WHERE ordenamiento_id = ? ORDER BY nro_secuencia ASC, id ASC",
                 (ord_id,),
@@ -4852,7 +5080,11 @@ class RecordsService:
             query += " ORDER BY o.id ASC" if orden_asc else " ORDER BY o.id DESC"
 
             rows = conn.execute(query, params).fetchall()
-            resultado = [dict(r) for r in rows]
+            resultado = []
+            for r in rows:
+                item = dict(r)
+                item["regimen"] = self.normalizar_regimen_parada(item.get("regimen"), default="H")
+                resultado.append(item)
 
             if filtros and filtros.get("fecha"):
                 f_filtro = parsear_fecha(filtros["fecha"], obligatorio=False)
@@ -4906,6 +5138,7 @@ class RecordsService:
             resultados: List[Dict[str, Any]] = []
             for r in rows:
                 d_item = dict(r)
+                d_item["regimen"] = self.normalizar_regimen_parada(d_item.get("regimen"), default="H")
                 if f_obj:
                     d_em = parsear_fecha(d_item.get("fecha_emision"), obligatorio=False)
                     if d_em and d_em.date() != f_obj.date():

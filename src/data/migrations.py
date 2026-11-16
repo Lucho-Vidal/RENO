@@ -307,7 +307,7 @@ def init_database_schema(db: DatabaseManager) -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 nro_tren TEXT NOT NULL,
                 itinerario TEXT NOT NULL DEFAULT '',
-                regimen TEXT NOT NULL DEFAULT 'LV',
+                regimen TEXT NOT NULL DEFAULT 'H',
                 orden_parada INTEGER NOT NULL DEFAULT 1,
                 estacion TEXT NOT NULL,
                 hora_paso TEXT NOT NULL,
@@ -345,7 +345,7 @@ def init_database_schema(db: DatabaseManager) -> None:
                 deposito TEXT NOT NULL DEFAULT 'PC',
                 itinerario TEXT NOT NULL DEFAULT '',
                 ciclo_o_turno TEXT NOT NULL DEFAULT '',
-                regimen TEXT NOT NULL DEFAULT 'LV',
+                regimen TEXT NOT NULL DEFAULT 'H',
                 motivo_orden TEXT NOT NULL DEFAULT '',
                 observacion_pie TEXT NOT NULL DEFAULT '',
                 ref_pct TEXT NOT NULL DEFAULT '',
@@ -492,7 +492,9 @@ def init_database_schema(db: DatabaseManager) -> None:
             for r in vueltas_rows:
                 nt = str(r[0]).strip()
                 itin = str(r[1] or "").strip()
-                reg = str(r[2] or "LV").strip()
+                reg = str(r[2] or "H").strip()
+                if reg.upper() in ("LV", "L-V", "LAV", "L A V", "HABIL", "HÁBIL", "DIA HABIL", "DÍA HÁBIL"):
+                    reg = "H"
                 orig = str(r[3] or "").strip()
                 hs = str(r[4] or "").strip()
                 dest = str(r[5] or "").strip()
@@ -511,6 +513,19 @@ def init_database_schema(db: DatabaseManager) -> None:
                                 """,
                                 (nt, itin, reg, orden_por_tren[ord_k], est, hr),
                             )
+
+        # Normalizar régimen histórico 'LV'/'L-V'/'HABIL' a 'H' (Hábil) en paradas y ordenamientos
+        legacy_habil_vals = "('LV', 'L-V', 'LAV', 'L A V', 'HABIL', 'HÁBIL', 'DIA HABIL', 'DÍA HÁBIL', 'LUNES A VIERNES')"
+        conn.execute(
+            f"""UPDATE tren_paradas
+                SET regimen = 'H', sync_status = 'pending', updated_at = datetime('now', 'localtime')
+                WHERE UPPER(TRIM(COALESCE(regimen, ''))) IN {legacy_habil_vals};"""
+        )
+        conn.execute(
+            f"""UPDATE ordenamientos
+                SET regimen = 'H', sync_status = 'pending', updated_at = datetime('now', 'localtime')
+                WHERE UPPER(TRIM(COALESCE(regimen, ''))) IN {legacy_habil_vals};"""
+        )
 
         conn.execute(
             "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES (?, ?);",
@@ -539,6 +554,17 @@ def _asegurar_migracion_turnos_itinerario(db: DatabaseManager) -> None:
         with db.write_transaction() as conn:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_turnos_itin_regimen ON turnos_itinerario(regimen);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_turnos_itin_vigente ON turnos_itinerario(itinerario_vigente);")
+            conn.execute(
+                """UPDATE turnos_itinerario
+                   SET regimen = 'H', sync_status = 'pending', updated_at = datetime('now', 'localtime')
+                   WHERE UPPER(TRIM(COALESCE(regimen, ''))) IN ('LV', 'L-V', 'LAV', 'L A V', 'HABIL', 'HÁBIL', 'LUNES A VIERNES')
+                     AND NOT EXISTS (
+                         SELECT 1 FROM turnos_itinerario t2
+                         WHERE t2.codigo_turno = turnos_itinerario.codigo_turno
+                           AND UPPER(TRIM(COALESCE(t2.regimen, ''))) = 'H'
+                           AND t2.itinerario_vigente = turnos_itinerario.itinerario_vigente
+                     );"""
+            )
         return
 
     lock_file = None

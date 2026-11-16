@@ -360,7 +360,7 @@ class TurnoDialog(BaseDialog):
         if t.get("duracion_jornada"):
             self.txt_duracion.setText(str(t["duracion_jornada"]))
 
-        reg_raw = str(t.get("regimen") or "TODOS").strip().upper()
+        reg_raw = self.records_service.normalizar_regimen_turno(t.get("regimen"), default="TODOS")
         idx_reg = self.combo_regimen.findData(reg_raw)
         if idx_reg >= 0:
             self.combo_regimen.setCurrentIndex(idx_reg)

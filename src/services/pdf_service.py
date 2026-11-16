@@ -687,7 +687,11 @@ class PDFService:
         nombre = str(ordenamiento.get("nombre_personal") or "-")
         itinerario = str(ordenamiento.get("itinerario") or "-")
         ciclo_turno = str(ordenamiento.get("ciclo_o_turno") or "-")
-        regimen = str(ordenamiento.get("regimen") or "LV")
+        reg_raw = str(ordenamiento.get("regimen") or "H").strip()
+        if reg_raw.upper() in ("LV", "L-V", "LAV", "L A V", "HABIL", "HÁBIL", "DIA HABIL", "DÍA HÁBIL", "LUNES A VIERNES"):
+            regimen = "H"
+        else:
+            regimen = reg_raw
         motivo = str(ordenamiento.get("motivo_orden") or "-")
         obs_pie = str(ordenamiento.get("observacion_pie") or "")
         ref_pct = str(ordenamiento.get("ref_pct") or "-")
