@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QTabWidget,
@@ -2106,7 +2107,8 @@ class AdminConfigWidget(QWidget):
 
         card_sync = QFrame()
         card_sync.setObjectName("cardFrame")
-        card_sync.setMaximumWidth(600)
+        card_sync.setMinimumWidth(680)
+        card_sync.setMaximumWidth(880)
         lay_card_sync = QVBoxLayout(card_sync)
         lay_card_sync.setContentsMargins(15, 15, 15, 15)
         lay_card_sync.setSpacing(14)
@@ -2214,24 +2216,30 @@ class AdminConfigWidget(QWidget):
         lay_card_sync.addWidget(self.box_proxy)
 
         # Botones de prueba y sincronización total
-        btn_test_box = QHBoxLayout()
+        btn_test_box = QVBoxLayout()
+        btn_test_box.setSpacing(8)
         self.btn_probar_supa = QPushButton("🔌 Probar Conexión Ahora (Testear Modo Seleccionado)")
         self.btn_probar_supa.setObjectName("btnSecondary")
+        self.btn_probar_supa.setMinimumHeight(38)
+        self.btn_probar_supa.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_probar_supa.clicked.connect(self._probar_conexion_supa)
         btn_test_box.addWidget(self.btn_probar_supa)
 
         self.btn_sync_total = QPushButton("⬆️ Forzar Sincronización Total (Subir Toda la Base a Supabase)")
         self.btn_sync_total.setObjectName("btnPrimary")
+        self.btn_sync_total.setMinimumHeight(38)
+        self.btn_sync_total.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_sync_total.clicked.connect(self._forzar_sincronizacion_total)
         btn_test_box.addWidget(self.btn_sync_total)
 
         self.btn_vaciar_y_subir = QPushButton("🗑️ Vaciar Supabase y Re-subir Todo")
         self.btn_vaciar_y_subir.setObjectName("btnDanger")
+        self.btn_vaciar_y_subir.setMinimumHeight(38)
+        self.btn_vaciar_y_subir.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_vaciar_y_subir.setToolTip("Elimina todos los datos en Supabase y vuelve a subir toda la base local limpia (ideal para pase a producción)")
         self.btn_vaciar_y_subir.clicked.connect(self._vaciar_y_resubir_supabase)
         btn_test_box.addWidget(self.btn_vaciar_y_subir)
 
-        btn_test_box.addStretch()
         lay_card_sync.addLayout(btn_test_box)
         lay_card_sync.addStretch()
 
