@@ -48,7 +48,10 @@ from src.services.backup_service import BackupService
 from src.services.excel_service import ExcelService
 from src.services.pdf_service import PDFService
 from src.services.records_service import RecordsService
+from src.services.sync_service import MODO_LOCAL, MODO_SHARED_SQLITE, MODO_SUPABASE, SyncService
+from src.services.sync_worker import SyncBackgroundWorker
 from src.services.word_service import WordService
+from src.ui.dialogs.sincronizacion_config_dialog import SincronizacionConfigDialog
 from src.ui.views.administracion_view import AdministracionView
 from src.ui.views.buscador_turnos_view import BuscadorTurnosView
 from src.ui.views.cambios_turno_view import CambiosTurnoView
@@ -116,6 +119,21 @@ class MainWindow(QMainWindow):
 
         self.settings = AppSettings()
         self.outbox_queue = OutboxQueue(self.db)
+        self.sync_service = SyncService(
+            self.db,
+            outbox=self.outbox_queue,
+            supabase_sync=self.supabase_sync,
+        )
+        cfg_sync = cargar_configuracion_app()
+        self.sync_worker = SyncBackgroundWorker(
+            self.sync_service,
+            interval_sec=int(cfg_sync.get("sync_interval_sec") or 45),
+            auto_enabled=bool(cfg_sync.get("sync_auto_enabled", True)),
+            parent=self,
+        )
+        self.sync_worker.sync_started.connect(self._on_sync_started)
+        self.sync_worker.sync_finished.connect(self._on_sync_finished)
+        self.sync_worker.status_updated.connect(self._on_sync_status_updated)
         self.toast = ToastWidget()
 
         self._ultimo_movimiento = time.time()
@@ -153,6 +171,7 @@ class MainWindow(QMainWindow):
         # Primer refresco
         self.recargar_todo()
         self._verificar_backup_diario()
+        self.sync_worker.start()
 
     def _aplicar_estilos(self, tema: str | None = None) -> None:
         try:
@@ -260,6 +279,9 @@ class MainWindow(QMainWindow):
             if self._tiene_permiso("sesion.configurar"):
                 act_cfg = menu_admin.addAction("⚙️ Configuración del Sistema")
                 act_cfg.triggered.connect(self._abrir_config_sistema_dialog)
+
+                act_sync_cfg = menu_admin.addAction("🔄 Sincronización (Red / Supabase / Local)")
+                act_sync_cfg.triggered.connect(self._abrir_config_sincronizacion)
 
             if self._tiene_permiso("destinatarios_informe.administrar") or self._tiene_permiso("destinatarios_ordenamiento.administrar"):
                 act_dest = menu_admin.addAction("📧 Destinatarios de Correo")
@@ -458,10 +480,16 @@ class MainWindow(QMainWindow):
         self.lbl_db.setStyleSheet("color: #6B7280; padding: 0 8px;")
         self.status_bar.addWidget(self.lbl_db)
 
-        # Indicador de sincronización híbrida
-        self.lbl_sync = QLabel("⚪ Offline")
-        self.lbl_sync.setStyleSheet("padding: 2px 8px; font-weight: bold; border-radius: 4px; background-color: #E5E7EB; color: #4B5563;")
-        self.status_bar.addPermanentWidget(self.lbl_sync)
+        # Indicador de sincronización multimodo (clicable para configurar)
+        self.btn_sync_status = QPushButton("🏠 Modo Local")
+        self.btn_sync_status.setFixedHeight(22)
+        self.btn_sync_status.setCursor(Qt.PointingHandCursor)
+        self.btn_sync_status.setToolTip("Clic para configurar modo de sincronización (Local / Red Compartida / Supabase)")
+        self.btn_sync_status.setStyleSheet(
+            "padding: 2px 10px; font-weight: bold; border-radius: 4px; border: 1px solid #D1D5DB; background-color: #E5E7EB; color: #374151;"
+        )
+        self.btn_sync_status.clicked.connect(self._abrir_config_sincronizacion)
+        self.status_bar.addPermanentWidget(self.btn_sync_status)
 
         # Botón sincronizar ahora
         btn_sync = QPushButton("🔄 Sincronizar")
@@ -486,7 +514,7 @@ class MainWindow(QMainWindow):
         self.timer_refresh.timeout.connect(self.recargar_todo)
         self.timer_refresh.start()
 
-        # Timer de sincronización en segundo plano cada 120s
+        # Timer auxiliar de sincronización (delega en sync_worker)
         self.timer_sync = QTimer(self)
         self.timer_sync.setInterval(120 * 1000)
         self.timer_sync.timeout.connect(self.sincronizar_ahora)
@@ -828,42 +856,105 @@ class MainWindow(QMainWindow):
         """Manejador para el clic en la tarjeta KPI 'SIN REVISAR' del dashboard."""
         self._mostrar_nuevos_registros()
 
-    def sincronizar_ahora(self) -> None:
-        if not self.supabase_sync:
-            self._actualizar_badge_sync()
+    def sincronizar_ahora(self, forzar_todo: bool = False) -> None:
+        if hasattr(self, "sync_worker") and self.sync_worker is not None:
+            self.sync_worker.trigger_sync(forzar_todo=forzar_todo)
+            return
+        self._actualizar_badge_sync()
+
+    def _on_sync_started(self) -> None:
+        if self._cerrando or not hasattr(self, "btn_sync_status"):
+            return
+        self.btn_sync_status.setText("🔄 Sincronizando en segundo plano...")
+        self.btn_sync_status.setStyleSheet(
+            "padding: 2px 10px; font-weight: bold; border-radius: 4px; border: 1px solid #93C5FD; background-color: #DBEAFE; color: #1E40AF;"
+        )
+
+    def _on_sync_finished(self, res: dict) -> None:
+        if self._cerrando:
+            return
+        self._on_sync_status_updated(res)
+        if res.get("ok") and (res.get("recibidos", 0) > 0):
+            try:
+                self.recargar_todo()
+            except Exception:
+                pass
+
+    def _on_sync_status_updated(self, estado: dict) -> None:
+        if self._cerrando or not hasattr(self, "btn_sync_status"):
+            return
+        modo = estado.get("modo", MODO_LOCAL)
+        conectado = bool(estado.get("conectado"))
+        pendientes = int(estado.get("pendientes", 0))
+
+        if modo == MODO_LOCAL:
+            self.btn_sync_status.setText("🏠 Modo Local")
+            self.btn_sync_status.setStyleSheet(
+                "padding: 2px 10px; font-weight: bold; border-radius: 4px; border: 1px solid #D1D5DB; background-color: #E5E7EB; color: #374151;"
+            )
             return
 
-        def _do_sync():
-            return self.supabase_sync.sincronizar_completo()
+        if modo == MODO_SHARED_SQLITE:
+            if conectado and pendientes == 0:
+                self.btn_sync_status.setText("📁 Red Compartida Conectada | Al día")
+                self.btn_sync_status.setStyleSheet(
+                    "padding: 2px 10px; font-weight: bold; border-radius: 4px; border: 1px solid #86EFAC; background-color: #DCFCE7; color: #166534;"
+                )
+            elif conectado:
+                self.btn_sync_status.setText(f"📁 Red Compartida ({pendientes} pend.)")
+                self.btn_sync_status.setStyleSheet(
+                    "padding: 2px 10px; font-weight: bold; border-radius: 4px; border: 1px solid #FDE68A; background-color: #FEF3C7; color: #92400E;"
+                )
+            else:
+                self.btn_sync_status.setText(f"📁 Red Desconectada ({pendientes} pend.)")
+                self.btn_sync_status.setStyleSheet(
+                    "padding: 2px 10px; font-weight: bold; border-radius: 4px; border: 1px solid #FDBA74; background-color: #FFEDD5; color: #9A3412;"
+                )
+            return
 
-        def _on_success(res):
-            logger.info("Sincronización Supabase completada con éxito.")
-            self._actualizar_badge_sync(sincronizado=True)
-
-        def _on_error(err, tb):
-            logger.warning(f"Sincronización fallida (modo offline activo): {err}")
-            self._actualizar_badge_sync(sincronizado=False, error=True)
-
-        self.lbl_sync.setText("🟡 Sincronizando...")
-        self.lbl_sync.setStyleSheet("padding: 2px 8px; font-weight: bold; border-radius: 4px; background-color: #FEF3C7; color: #92400E;")
-        run_async(_do_sync, on_success=_on_success, on_error=_on_error)
+        # MODO_SUPABASE
+        if conectado and pendientes == 0:
+            self.btn_sync_status.setText("☁️ Supabase Conectado")
+            self.btn_sync_status.setStyleSheet(
+                "padding: 2px 10px; font-weight: bold; border-radius: 4px; border: 1px solid #86EFAC; background-color: #DCFCE7; color: #166534;"
+            )
+        elif conectado:
+            self.btn_sync_status.setText(f"☁️ Supabase ({pendientes} pend.)")
+            self.btn_sync_status.setStyleSheet(
+                "padding: 2px 10px; font-weight: bold; border-radius: 4px; border: 1px solid #FDE68A; background-color: #FEF3C7; color: #92400E;"
+            )
+        else:
+            self.btn_sync_status.setText(f"☁️ Supabase Offline ({pendientes} pend.)")
+            self.btn_sync_status.setStyleSheet(
+                "padding: 2px 10px; font-weight: bold; border-radius: 4px; border: 1px solid #FCA5A5; background-color: #FEE2E2; color: #991B1B;"
+            )
 
     def _actualizar_badge_sync(self, sincronizado: bool = False, error: bool = False) -> None:
-        pendientes = self.outbox_queue.contar_pendientes()
-        if not self.supabase_sync:
-            self.lbl_sync.setText(f"⚪ Local (Pendientes: {pendientes})")
-            self.lbl_sync.setStyleSheet("padding: 2px 8px; font-weight: bold; border-radius: 4px; background-color: #E5E7EB; color: #4B5563;")
-            return
+        if hasattr(self, "sync_service") and self.sync_service is not None:
+            estado = self.sync_service.get_estado_sincronizacion()
+            if error:
+                estado["conectado"] = False
+            elif sincronizado:
+                estado["conectado"] = True
+            self._on_sync_status_updated(estado)
 
-        if error:
-            self.lbl_sync.setText(f"🔴 Offline ({pendientes} en cola)")
-            self.lbl_sync.setStyleSheet("padding: 2px 8px; font-weight: bold; border-radius: 4px; background-color: #FEE2E2; color: #991B1B;")
-        elif pendientes == 0:
-            self.lbl_sync.setText("🟢 Sincronizado")
-            self.lbl_sync.setStyleSheet("padding: 2px 8px; font-weight: bold; border-radius: 4px; background-color: #DCFCE7; color: #166534;")
-        else:
-            self.lbl_sync.setText(f"🟡 Pendientes: {pendientes}")
-            self.lbl_sync.setStyleSheet("padding: 2px 8px; font-weight: bold; border-radius: 4px; background-color: #FEF3C7; color: #92400E;")
+    def _abrir_config_sincronizacion(self) -> None:
+        dlg = SincronizacionConfigDialog(
+            sync_service=self.sync_service,
+            on_trigger_sync=self.sincronizar_ahora,
+            on_abrir_supabase_avanzado=self._abrir_config_sistema_dialog,
+            parent=self,
+        )
+
+        def _al_guardar(cfg: dict) -> None:
+            if hasattr(self, "sync_worker") and self.sync_worker is not None:
+                self.sync_worker.set_interval(int(cfg.get("sync_interval_sec") or 45))
+                self.sync_worker.set_auto_enabled(bool(cfg.get("sync_auto_enabled", True)))
+                self.sync_worker.trigger_sync(forzar_todo=False)
+            self._actualizar_badge_sync()
+
+        dlg.configuracion_guardada.connect(_al_guardar)
+        dlg.exec()
 
     def _exportar_todo_excel(self) -> None:
         default_name = f"RENO_Completo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
@@ -1157,6 +1248,13 @@ class MainWindow(QMainWindow):
         if hasattr(self, "tab_administracion") and hasattr(self.tab_administracion, "cerrar_limpiamente"):
             try:
                 self.tab_administracion.cerrar_limpiamente()
+            except Exception:
+                pass
+        sync_worker = getattr(self, "sync_worker", None)
+        if sync_worker is not None:
+            try:
+                sync_worker.stop()
+                sync_worker.wait(2000)
             except Exception:
                 pass
         for worker_attr in ("_worker_updater", "_worker_manual_updater"):

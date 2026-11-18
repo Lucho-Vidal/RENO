@@ -527,6 +527,10 @@ def init_database_schema(db: DatabaseManager) -> None:
                 WHERE UPPER(TRIM(COALESCE(regimen, ''))) IN {legacy_habil_vals};"""
         )
 
+        cols_outbox = {row[1] for row in conn.execute("PRAGMA table_info(sync_outbox);").fetchall()}
+        if "estado" not in cols_outbox:
+            conn.execute("ALTER TABLE sync_outbox ADD COLUMN estado TEXT NOT NULL DEFAULT 'PENDIENTE';")
+
         conn.execute(
             "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES (?, ?);",
             ("version", str(SCHEMA_VERSION_V2)),

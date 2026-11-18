@@ -17,14 +17,18 @@ class OutboxQueue:
 
     def contar_pendientes(self) -> int:
         with self.db.read_connection() as conn:
-            row = conn.execute("SELECT COUNT(*) FROM sync_outbox;").fetchone()
+            row = conn.execute(
+                "SELECT COUNT(*) FROM sync_outbox WHERE COALESCE(estado, 'PENDIENTE') != 'SINCRONIZADO';"
+            ).fetchone()
             return int(row[0]) if row else 0
 
     def obtener_pendientes(self, limite: int = 200) -> list[SyncQueueItem]:
         with self.db.read_connection() as conn:
             rows = conn.execute(
                 """SELECT id, tabla, registro_pk, operacion, payload_json, creado_en, intentos, ultimo_error
-                   FROM sync_outbox ORDER BY id ASC LIMIT ?;""",
+                   FROM sync_outbox
+                   WHERE COALESCE(estado, 'PENDIENTE') != 'SINCRONIZADO'
+                   ORDER BY id ASC LIMIT ?;""",
                 (limite,),
             ).fetchall()
             return [
@@ -48,11 +52,21 @@ class OutboxQueue:
             placeholders = ",".join("?" for _ in ids)
             conn.execute(f"DELETE FROM sync_outbox WHERE id IN ({placeholders});", ids)
 
+    def marcar_sincronizados(self, ids: list[int]) -> None:
+        if not ids:
+            return
+        with self.db.write_transaction() as conn:
+            placeholders = ",".join("?" for _ in ids)
+            conn.execute(
+                f"UPDATE sync_outbox SET estado = 'SINCRONIZADO', ultimo_error = NULL WHERE id IN ({placeholders});",
+                ids,
+            )
+
     def registrar_fallo(self, item_id: int, mensaje_error: str) -> None:
         with self.db.write_transaction() as conn:
             conn.execute(
                 """UPDATE sync_outbox
-                   SET intentos = intentos + 1, ultimo_error = ?
+                   SET intentos = intentos + 1, ultimo_error = ?, estado = 'ERROR'
                    WHERE id = ?;""",
                 (mensaje_error[:500], item_id),
             )
@@ -96,7 +110,8 @@ class OutboxQueue:
                                operacion = 'UPSERT',
                                payload_json = excluded.payload_json,
                                intentos = 0,
-                               ultimo_error = NULL;""",
+                               ultimo_error = NULL,
+                               estado = 'PENDIENTE';""",
                         (t, val_pk, json.dumps(d, ensure_ascii=False, default=str)),
                     )
                     total += 1
