@@ -1737,6 +1737,158 @@ class RecordsService:
 
         return {"libres": libres, "ocupados": ocupados, "con_novedad": con_novedad}
 
+    def obtener_estado_personal_ciclo_rango(
+        self,
+        fecha_desde: str,
+        fecha_hasta: str,
+        dotacion: Optional[str] = None,
+        especialidad: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Devuelve el estado diario del personal de ciclo (libres, ocupados y con_novedad)
+        para cada día dentro del rango [fecha_desde, fecha_hasta]."""
+        f_desde = parsear_fecha(fecha_desde, "Fecha desde", obligatorio=True).date()
+        f_hasta = parsear_fecha(fecha_hasta, "Fecha hasta", obligatorio=True).date()
+        if f_desde > f_hasta:
+            raise ValueError("La fecha desde no puede ser mayor a la fecha hasta.")
+
+        with self.db.read_connection() as conn:
+            query_emp = """
+                SELECT legajo, apellidos_nombres, especialidad, dotacion, turnos, franco, franco_horario
+                FROM empleados
+                WHERE activo = 1 AND UPPER(TRIM(turnos)) LIKE 'CICLO%'
+            """
+            params_emp: List[Any] = []
+            if dotacion and dotacion != "Todas":
+                query_emp += " AND LOWER(TRIM(dotacion)) = LOWER(TRIM(?))"
+                params_emp.append(dotacion)
+            query_emp += " ORDER BY dotacion, apellidos_nombres"
+            empleados_ciclo = [dict(r) for r in conn.execute(query_emp, params_emp).fetchall()]
+            if especialidad and especialidad != "Todas":
+                empleados_ciclo = [
+                    emp for emp in empleados_ciclo
+                    if _coincide_especialidad(emp.get("especialidad"), especialidad)
+                ]
+
+            reemplazos_activos = conn.execute(
+                """SELECT nr.*, n.legajo AS legajo_titular, n.apellidos_nombres AS apellidos_titular,
+                          n.turnos AS turno_titular, n.novedad AS tipo_novedad,
+                          n.fecha_fin AS fecha_fin_novedad, n.dotacion AS dotacion_titular
+                   FROM novedad_reemplazos nr
+                   JOIN novedades n ON n.id = nr.novedad_id
+                   WHERE nr.activo = 1 AND n.activo = 1"""
+            ).fetchall()
+
+            novedades_propias_rows = conn.execute(
+                """SELECT id, legajo, novedad, fecha_inicio, fecha_fin, observaciones
+                   FROM novedades
+                   WHERE activo = 1
+                   ORDER BY id DESC"""
+            ).fetchall()
+
+            jornadas_rows = conn.execute(
+                """SELECT legajo, fecha, toma, deja, franco_anticipado, observaciones
+                   FROM ciclo_jornadas
+                   WHERE fecha BETWEEN ? AND ?""",
+                (f_desde.strftime("%Y-%m-%d"), f_hasta.strftime("%Y-%m-%d")),
+            ).fetchall()
+
+        reemplazos_por_legajo: Dict[int, List[Tuple[date, Optional[date], Dict[str, Any]]]] = {}
+        for r in reemplazos_activos:
+            r_ini, r_fin_opt = self._rango_fechas_reemplazo(r["fecha_inicio"], r["fecha_fin"], r["fecha_fin_novedad"])
+            if r_ini:
+                reemplazos_por_legajo.setdefault(int(r["legajo_reemplazo"]), []).append((r_ini, r_fin_opt, dict(r)))
+
+        novs_por_legajo: Dict[int, List[Tuple[date, Optional[date], Dict[str, Any]]]] = {}
+        for np in novedades_propias_rows:
+            np_ini, np_fin_opt = self._rango_fechas_reemplazo(np["fecha_inicio"], np["fecha_fin"], None)
+            if np_ini:
+                novs_por_legajo.setdefault(int(np["legajo"]), []).append((np_ini, np_fin_opt, dict(np)))
+
+        jornadas_por_clave = {
+            (int(j["legajo"]), str(j["fecha"])): dict(j)
+            for j in jornadas_rows
+        }
+
+        dias_resultado: List[Dict[str, Any]] = []
+        d_step = f_desde
+        while d_step <= f_hasta:
+            f_iso = d_step.strftime("%Y-%m-%d")
+            dia_semana_str = DIAS_SEMANA[d_step.weekday()]
+            dia_sem_norm = normalizar_dia_semana(dia_semana_str)
+
+            libres: List[Dict[str, Any]] = []
+            ocupados: List[Dict[str, Any]] = []
+            con_novedad: List[Dict[str, Any]] = []
+
+            for emp in empleados_ciclo:
+                leg = int(emp["legajo"])
+                jornada_db = jornadas_por_clave.get((leg, f_iso))
+                toma = (jornada_db.get("toma") or "").strip() if jornada_db else ""
+                deja = (jornada_db.get("deja") or "").strip() if jornada_db else ""
+
+                nov_propia = None
+                for np_ini, np_fin_opt, np_data in novs_por_legajo.get(leg, ()):
+                    if np_ini <= d_step and (np_fin_opt is None or d_step <= np_fin_opt):
+                        nov_propia = np_data
+                        break
+
+                if nov_propia:
+                    item_nov = dict(emp)
+                    item_nov["novedad_propia_id"] = nov_propia["id"]
+                    item_nov["novedad_propia"] = nov_propia["novedad"]
+                    item_nov["novedad_fecha_inicio"] = nov_propia["fecha_inicio"]
+                    item_nov["novedad_fecha_fin"] = nov_propia["fecha_fin"] or "-"
+                    con_novedad.append(item_nov)
+                    continue
+
+                asignacion = None
+                for r_ini, r_fin_opt, r_data in reemplazos_por_legajo.get(leg, ()):
+                    if r_ini <= d_step and (r_fin_opt is None or d_step <= r_fin_opt):
+                        asignacion = r_data
+                        break
+
+                if asignacion:
+                    item = dict(emp)
+                    item["reemplazo_id"] = asignacion["id"]
+                    item["novedad_id"] = asignacion["novedad_id"]
+                    item["reemplaza_a"] = f"{asignacion['legajo_titular']} - {asignacion['apellidos_titular']}"
+                    item["turno_titular"] = asignacion["turno_titular"]
+                    item["tipo_novedad"] = asignacion["tipo_novedad"]
+                    item["fecha_inicio_relevo"] = asignacion["fecha_inicio"]
+                    item["fecha_fin_relevo"] = asignacion["fecha_fin"] or asignacion["fecha_fin_novedad"] or "Sin fecha fin"
+                    item["toma"] = toma
+                    item["deja"] = deja
+                    ocupados.append(item)
+                else:
+                    franco_norm = normalizar_dia_semana(emp.get("franco") or "")
+                    franco_hor = (emp.get("franco_horario") or "").strip()
+                    if jornada_db and jornada_db.get("franco_anticipado"):
+                        estado_dia = "Franco Anticipado"
+                    elif franco_norm and franco_norm in dia_sem_norm:
+                        estado_dia = f"Franco (desde {franco_hor})" if franco_hor else "Franco"
+                    elif toma or deja:
+                        estado_dia = f"Disponible ({toma or '-'} a {deja or '-'})"
+                    else:
+                        estado_dia = "Disponible"
+
+                    item = dict(emp)
+                    item["estado_dia"] = estado_dia
+                    item["toma"] = toma
+                    item["deja"] = deja
+                    libres.append(item)
+
+            dias_resultado.append({
+                "fecha": d_step.strftime("%d/%m/%Y"),
+                "fecha_iso": f_iso,
+                "dia_semana": dia_semana_str,
+                "libres": libres,
+                "ocupados": ocupados,
+                "con_novedad": con_novedad,
+            })
+            d_step += timedelta(days=1)
+
+        return dias_resultado
+
     def guardar_jornada_ciclo(
         self,
         legajo: int,

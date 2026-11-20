@@ -7,9 +7,10 @@ Calendarios Mensuales de Personal de Ciclo e Informes Ejecutivos del Dashboard.
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from datetime import datetime
+from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4, letter
+from reportlab.lib.pagesizes import A4, landscape, letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch, cm
 from reportlab.platypus import (
@@ -478,6 +479,213 @@ class PDFService:
         story.append(t)
 
         doc.build(story)
+        return str(out_file)
+
+    def generar_servicio_ciclo_rango_pdf(
+        self,
+        dias_datos: List[Dict[str, Any]],
+        fecha_desde: str,
+        fecha_hasta: str,
+        output_path: str,
+        dotacion: Optional[str] = None,
+        especialidad: Optional[str] = None,
+    ) -> str:
+        """Genera un PDF en hoja horizontal (landscape A4) del Personal de Ciclo
+        filtrado por rango de fechas, dotación y especialidad."""
+        out_file = Path(output_path)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+
+        estilos = self._crear_estilos()
+        st_day = ParagraphStyle(
+            "CicloRangoDay",
+            parent=estilos["Subtitulo"],
+            fontName="Helvetica-Bold",
+            fontSize=10,
+            leading=13,
+            textColor=PRIMARY,
+            spaceBefore=6,
+            spaceAfter=3,
+        )
+        st_sec = ParagraphStyle(
+            "CicloRangoSec",
+            parent=estilos["TablaCell"],
+            fontName="Helvetica-Bold",
+            fontSize=8.2,
+            leading=10.5,
+            textColor=TEXT_DARK,
+            spaceBefore=2,
+            spaceAfter=2,
+        )
+        st_empty = ParagraphStyle(
+            "CicloRangoEmpty",
+            parent=estilos["TablaCell"],
+            fontName="Helvetica-Oblique",
+            fontSize=7.8,
+            leading=10,
+            textColor=colors.HexColor("#64748B"),
+            spaceAfter=3,
+        )
+        st_th = ParagraphStyle(
+            "CicloRangoTH",
+            parent=estilos["TablaHeader"],
+            fontSize=7.2,
+            leading=9,
+        )
+        st_td = ParagraphStyle(
+            "CicloRangoTD",
+            parent=estilos["TablaCell"],
+            fontSize=7.2,
+            leading=9.2,
+        )
+        st_td_c = ParagraphStyle(
+            "CicloRangoTDC",
+            parent=estilos["TablaCellCenter"],
+            fontSize=7.2,
+            leading=9.2,
+        )
+
+        def _p(txt: Any, st: ParagraphStyle) -> Paragraph:
+            return Paragraph(escape(str(txt if txt is not None else "")), st)
+
+        dot_label = dotacion if (dotacion and dotacion != "Todas") else "Todas"
+        esp_label = especialidad if (especialidad and especialidad != "Todas") else "Todas"
+        generado_str = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+        story: List[Any] = [
+            _p("INFORME DE SERVICIO — PERSONAL DE CICLO", estilos["Titulo"]),
+            _p(
+                f"Período: {fecha_desde} al {fecha_hasta}   |   "
+                f"Dotación: {dot_label}   |   Especialidad: {esp_label}   |   Generado: {generado_str}",
+                estilos["Subtitulo"],
+            ),
+            HRFlowable(width="100%", thickness=1, color=PRIMARY, spaceAfter=6),
+        ]
+
+        # A4 horizontal (29.7 cm - 2.0 cm márgenes = 27.7 cm útiles)
+        anchos_libres = [1.7 * cm, 6.0 * cm, 3.8 * cm, 2.2 * cm, 2.8 * cm, 2.5 * cm, 2.3 * cm, 6.4 * cm]
+        anchos_ocup = [1.6 * cm, 4.8 * cm, 3.2 * cm, 1.9 * cm, 5.2 * cm, 2.6 * cm, 4.0 * cm, 2.2 * cm, 2.2 * cm]
+
+        estilo_base = [
+            ("BACKGROUND", (0, 0), (-1, 0), PRIMARY),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.4, BORDER_COLOR),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, BG_LIGHT]),
+            ("TOPPADDING", (0, 0), (-1, -1), 2.5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ]
+
+        for idx_dia, dia in enumerate(dias_datos):
+            libres = dia.get("libres", [])
+            ocupados = dia.get("ocupados", [])
+            con_nov = dia.get("con_novedad", [])
+
+            dia_titulo = _p(
+                f"Fecha: {dia['fecha']} ({dia['dia_semana']}) — "
+                f"Disponibles: {len(libres)}   |   Asignados: {len(ocupados)}   |   Con novedad: {len(con_nov)}",
+                st_day,
+            )
+
+            # Tabla 1: Disponibles
+            sec_lib = _p("Personal de Ciclo DISPONIBLE", st_sec)
+            if libres:
+                rows_lib = [[
+                    _p("LEGAJO", st_th), _p("APELLIDOS Y NOMBRES", st_th), _p("ESPECIALIDAD", st_th),
+                    _p("DOTACIÓN", st_th), _p("TURNO", st_th), _p("FRANCO", st_th),
+                    _p("HOR. FRANCO", st_th), _p("ESTADO EN FECHA", st_th),
+                ]]
+                for emp in libres:
+                    rows_lib.append([
+                        _p(emp.get("legajo", ""), st_td_c),
+                        _p(emp.get("apellidos_nombres", ""), st_td),
+                        _p(emp.get("especialidad", ""), st_td_c),
+                        _p(emp.get("dotacion", ""), st_td_c),
+                        _p(emp.get("turnos", ""), st_td_c),
+                        _p(emp.get("franco", ""), st_td_c),
+                        _p(emp.get("franco_horario", "") or "-", st_td_c),
+                        _p(emp.get("estado_dia") or "Disponible", st_td),
+                    ])
+                tbl_lib = Table(rows_lib, colWidths=anchos_libres, repeatRows=1)
+                tbl_lib.setStyle(TableStyle(estilo_base))
+                story.append(KeepTogether([dia_titulo, sec_lib, tbl_lib]))
+            else:
+                story.append(KeepTogether([dia_titulo, sec_lib, _p("Sin personal de ciclo disponible en esta fecha.", st_empty)]))
+
+            story.append(Spacer(1, 0.15 * cm))
+
+            # Tabla 2: Asignados + Con novedad propia activa
+            sec_oc = _p("Personal de Ciclo ASIGNADO / CON NOVEDAD ACTIVA", st_sec)
+            combinados = []
+            for emp in ocupados:
+                combinados.append((False, emp))
+            for emp in con_nov:
+                combinados.append((True, emp))
+
+            if combinados:
+                rows_oc = [[
+                    _p("LEGAJO", st_th), _p("APELLIDOS Y NOMBRES", st_th), _p("ESPECIALIDAD", st_th),
+                    _p("DOTACIÓN", st_th), _p("REEMPLAZA A / NOVEDAD", st_th), _p("TURNO CUB.", st_th),
+                    _p("MOTIVO", st_th), _p("DESDE", st_th), _p("HASTA", st_th),
+                ]]
+                t_style_oc = list(estilo_base)
+                for row_i, (es_nov, emp) in enumerate(combinados, start=1):
+                    if es_nov:
+                        nid = emp.get("novedad_propia_id", "")
+                        reemp_txt = f"NOVEDAD PROPIA #{nid}" if nid else "NOVEDAD PROPIA"
+                        turno_txt = "-"
+                        motivo_txt = emp.get("novedad_propia") or "-"
+                        desde_txt = emp.get("novedad_fecha_inicio") or "-"
+                        hasta_txt = emp.get("novedad_fecha_fin") or "Sin fecha fin"
+                        t_style_oc.append(("BACKGROUND", (0, row_i), (-1, row_i), colors.HexColor("#FFEBEE")))
+                        t_style_oc.append(("TEXTCOLOR", (0, row_i), (-1, row_i), colors.HexColor("#B71C1C")))
+                    else:
+                        reemp_txt = emp.get("reemplaza_a") or "-"
+                        turno_txt = emp.get("turno_titular") or "-"
+                        motivo_txt = emp.get("tipo_novedad") or "-"
+                        desde_txt = emp.get("fecha_inicio_relevo") or "-"
+                        hasta_txt = emp.get("fecha_fin_relevo") or "Sin fecha fin"
+
+                    rows_oc.append([
+                        _p(emp.get("legajo", ""), st_td_c),
+                        _p(emp.get("apellidos_nombres", ""), st_td),
+                        _p(emp.get("especialidad", ""), st_td_c),
+                        _p(emp.get("dotacion", ""), st_td_c),
+                        _p(reemp_txt, st_td),
+                        _p(turno_txt, st_td_c),
+                        _p(motivo_txt, st_td),
+                        _p(desde_txt, st_td_c),
+                        _p(hasta_txt, st_td_c),
+                    ])
+                tbl_oc = Table(rows_oc, colWidths=anchos_ocup, repeatRows=1)
+                tbl_oc.setStyle(TableStyle(t_style_oc))
+                story.append(KeepTogether([sec_oc, tbl_oc]))
+            else:
+                story.append(KeepTogether([sec_oc, _p("Sin personal de ciclo asignado ni con novedad en esta fecha.", st_empty)]))
+
+            if idx_dia < len(dias_datos) - 1:
+                story.append(Spacer(1, 0.22 * cm))
+                story.append(HRFlowable(width="100%", thickness=0.5, color=BORDER_COLOR, spaceAfter=4))
+
+        def _footer(canvas_obj, doc_obj):
+            canvas_obj.saveState()
+            canvas_obj.setFont("Helvetica", 7.5)
+            canvas_obj.setFillColor(colors.HexColor("#64748B"))
+            canvas_obj.drawString(1.0 * cm, 0.55 * cm, f"RENO — Personal de Ciclo ({dot_label}) | Generado: {generado_str}")
+            canvas_obj.drawRightString(landscape(A4)[0] - 1.0 * cm, 0.55 * cm, f"Página {doc_obj.page}")
+            canvas_obj.restoreState()
+
+        doc = SimpleDocTemplate(
+            str(out_file),
+            pagesize=landscape(A4),
+            leftMargin=1.0 * cm,
+            rightMargin=1.0 * cm,
+            topMargin=1.0 * cm,
+            bottomMargin=1.05 * cm,
+            title=f"Personal de Ciclo ({fecha_desde} al {fecha_hasta})",
+        )
+        doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
         return str(out_file)
 
     # ---------------------------------------------------------

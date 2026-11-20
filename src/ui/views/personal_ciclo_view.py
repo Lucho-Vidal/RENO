@@ -13,9 +13,12 @@ import unicodedata
 from PySide6.QtCore import QByteArray, QDate, QMimeData, QPoint, Qt, Signal
 from PySide6.QtGui import QColor, QDrag
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDateEdit,
     QDialogButtonBox,
+    QFileDialog,
+    QFormLayout,
     QFrame,
     QGroupBox,
     QHBoxLayout,
@@ -265,6 +268,11 @@ class PersonalCicloView(QWidget):
         self.btn_ver_calendario.setObjectName("btnSecondary")
         self.btn_ver_calendario.clicked.connect(self._abrir_calendario_seleccionado)
         bar_layout.addWidget(self.btn_ver_calendario)
+
+        self.btn_exportar_pdf = QPushButton("📄 Exportar PDF")
+        self.btn_exportar_pdf.setObjectName("btnSecondary")
+        self.btn_exportar_pdf.clicked.connect(self._abrir_exportar_pdf)
+        bar_layout.addWidget(self.btn_exportar_pdf)
 
         layout.addWidget(bar_frame)
 
@@ -642,3 +650,209 @@ class PersonalCicloView(QWidget):
                         QMessageBox.information(self, "Asignación Exitosa", f"Se asignó a {nombre} al relevo #{nov_sel['id']}.")
                     except Exception as e:
                         QMessageBox.critical(self, "Error", f"No se pudo asignar el relevo:\n{e}")
+
+    def _abrir_exportar_pdf(self) -> None:
+        dlg = ExportarCicloPDFDialog(
+            records_service=self.records_service,
+            pdf_service=self.pdf_service,
+            fecha_inicial=self.date_picker.date(),
+            dotacion_inicial=self.combo_dotacion.currentText(),
+            especialidad_inicial=self.combo_esp.currentText(),
+            parent=self,
+        )
+        dlg.exec()
+
+
+class ExportarCicloPDFDialog(BaseDialog):
+    """Diálogo para exportar el servicio de Personal de Ciclo en PDF horizontal por rango de fechas y dotación, con envío por Outlook."""
+
+    def __init__(
+        self,
+        records_service: RecordsService,
+        pdf_service: PDFService,
+        fecha_inicial: Optional[QDate] = None,
+        dotacion_inicial: str = "Todas",
+        especialidad_inicial: str = "Todas",
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.records_service = records_service
+        self.pdf_service = pdf_service
+        self.setWindowTitle("Exportar Personal de Ciclo a PDF (Horizontal)")
+        self.setMinimumWidth(480)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        form = QFormLayout()
+        f_base = fecha_inicial if (fecha_inicial and fecha_inicial.isValid()) else QDate.currentDate()
+
+        self.date_desde = QDateEdit()
+        self.date_desde.setCalendarPopup(True)
+        self.date_desde.setDisplayFormat("dd/MM/yyyy")
+        self.date_desde.setDate(f_base)
+        form.addRow("Fecha desde:", self.date_desde)
+
+        self.date_hasta = QDateEdit()
+        self.date_hasta.setCalendarPopup(True)
+        self.date_hasta.setDisplayFormat("dd/MM/yyyy")
+        self.date_hasta.setDate(f_base)
+        form.addRow("Fecha hasta:", self.date_hasta)
+
+        self.combo_dot = QComboBox()
+        self.combo_dot.addItem("Todas")
+        for d in self.records_service.listar_dotaciones(incluir_inactivos=False):
+            self.combo_dot.addItem(d["nombre"])
+        idx_d = self.combo_dot.findText(dotacion_inicial or "Todas")
+        if idx_d >= 0:
+            self.combo_dot.setCurrentIndex(idx_d)
+        form.addRow("Dotación:", self.combo_dot)
+
+        self.combo_esp = QComboBox()
+        self.combo_esp.addItem("Todas")
+        for esp in self.records_service.listar_especialidades_empleados():
+            self.combo_esp.addItem(esp)
+        idx_e = self.combo_esp.findText(especialidad_inicial or "Todas")
+        if idx_e >= 0:
+            self.combo_esp.setCurrentIndex(idx_e)
+        form.addRow("Especialidad:", self.combo_esp)
+
+        layout.addLayout(form)
+
+        # Sección Outlook
+        grp_ol = QGroupBox("Envío por Microsoft Outlook (Opcional)")
+        lay_ol = QVBoxLayout(grp_ol)
+
+        self.chk_outlook = QCheckBox("Enviar PDF adjunto por Outlook")
+        lay_ol.addWidget(self.chk_outlook)
+
+        dest_default = ""
+        try:
+            dests = self.records_service.listar_destinatarios_informe(incluir_inactivos=False)
+            dest_default = "; ".join(str(d.get("email") or "").strip() for d in dests if d.get("email"))
+        except Exception:
+            dest_default = ""
+
+        h_dest = QHBoxLayout()
+        h_dest.addWidget(QLabel("Destinatarios (;):"))
+        self.txt_dest = QLineEdit(dest_default)
+        self.txt_dest.setPlaceholderText("correo1@empresa.com; correo2@empresa.com")
+        h_dest.addWidget(self.txt_dest, 1)
+        lay_ol.addLayout(h_dest)
+
+        self.chk_borrador = QCheckBox("Abrir en Outlook como borrador antes de enviar")
+        self.chk_borrador.setChecked(True)
+        lay_ol.addWidget(self.chk_borrador)
+
+        layout.addWidget(grp_ol)
+
+        self.chk_outlook.toggled.connect(self._toggle_outlook)
+        self._toggle_outlook(False)
+
+        btns = QHBoxLayout()
+        btns.addStretch()
+        btn_cancel = QPushButton("Cancelar")
+        btn_cancel.setObjectName("btnSecondary")
+        btn_cancel.clicked.connect(self.reject)
+        btn_export = QPushButton("📄 Exportar PDF")
+        btn_export.clicked.connect(self._ejecutar)
+        btns.addWidget(btn_cancel)
+        btns.addWidget(btn_export)
+        layout.addLayout(btns)
+
+    def _toggle_outlook(self, checked: bool) -> None:
+        self.txt_dest.setEnabled(checked)
+        self.chk_borrador.setEnabled(checked)
+
+    def _ejecutar(self) -> None:
+        if self.date_desde.date() > self.date_hasta.date():
+            QMessageBox.warning(self, "Fechas inválidas", "La fecha desde no puede ser mayor a la fecha hasta.")
+            return
+
+        f_desde = self.date_desde.date().toString("dd/MM/yyyy")
+        f_hasta = self.date_hasta.date().toString("dd/MM/yyyy")
+        dot = self.combo_dot.currentText()
+        esp = self.combo_esp.currentText()
+        dot_filtro = None if dot in ("", "Todas") else dot
+        esp_filtro = None if esp in ("", "Todas") else esp
+
+        enviar_ol = self.chk_outlook.isChecked()
+        abrir_borrador = self.chk_borrador.isChecked()
+        lista_dest = [
+            d.strip()
+            for d in self.txt_dest.text().replace(",", ";").split(";")
+            if d.strip()
+        ]
+        if enviar_ol and not abrir_borrador and not lista_dest:
+            QMessageBox.warning(
+                self,
+                "Destinatarios",
+                "Ingrese al menos un destinatario para enviar directamente por Outlook (o marque abrir como borrador).",
+            )
+            return
+
+        dot_tag = (dot_filtro or "Todas").replace(" ", "_")
+        sugerido = f"Personal_Ciclo_{dot_tag}_{f_desde.replace('/', '-')}_al_{f_hasta.replace('/', '-')}.pdf"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Guardar PDF de Personal de Ciclo",
+            sugerido,
+            "PDF Files (*.pdf)",
+        )
+        if not file_path:
+            return
+
+        try:
+            dias = self.records_service.obtener_estado_personal_ciclo_rango(
+                f_desde,
+                f_hasta,
+                dotacion=dot_filtro,
+                especialidad=esp_filtro,
+            )
+            pdf_out = self.pdf_service.generar_servicio_ciclo_rango_pdf(
+                dias,
+                f_desde,
+                f_hasta,
+                file_path,
+                dotacion=dot_filtro,
+                especialidad=esp_filtro,
+            )
+
+            extra_msg = ""
+            if enviar_ol:
+                from src.services.mail_service import MailService
+
+                dot_txt = dot_filtro or "Todas"
+                asunto = f"Personal de Ciclo - Dotación {dot_txt} ({f_desde} al {f_hasta})"
+                cuerpo = "\n".join([
+                    "Se adjunta el informe en PDF (hoja horizontal) de Personal de Ciclo.",
+                    f"Período: {f_desde} al {f_hasta}",
+                    f"Dotación: {dot_txt}",
+                    f"Especialidad: {esp_filtro or 'Todas'}",
+                ])
+                ok, msg_ol = MailService.crear_borrador_outlook(
+                    destinatarios=lista_dest,
+                    asunto=asunto,
+                    cuerpo_texto=cuerpo,
+                    adjuntos=[pdf_out],
+                    enviar_directo=not abrir_borrador,
+                )
+                if not ok:
+                    QMessageBox.warning(
+                        self,
+                        "PDF generado — Aviso Outlook",
+                        f"El PDF se guardó en:\n{pdf_out}\n\nPero Outlook devolvió un aviso:\n{msg_ol}",
+                    )
+                    self.accept()
+                    return
+                extra_msg = f"\n\n{msg_ol}"
+
+            QMessageBox.information(
+                self,
+                "Exportación Exitosa",
+                f"PDF horizontal generado correctamente en:\n{pdf_out}{extra_msg}",
+            )
+            self.accept()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"No se pudo generar el PDF:\n{e}")
+
