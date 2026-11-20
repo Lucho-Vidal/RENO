@@ -91,6 +91,16 @@ def init_database_schema(db: DatabaseManager) -> None:
                 updated_at TEXT DEFAULT (datetime('now', 'localtime'))
             );
 
+            CREATE TABLE IF NOT EXISTS destinatarios_ciclo (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre TEXT NOT NULL DEFAULT '',
+                email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                activo INTEGER NOT NULL DEFAULT 1 CHECK (activo IN (0, 1)),
+                sync_status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+            );
+
             CREATE TABLE IF NOT EXISTS roles (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 nombre TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -427,6 +437,7 @@ def init_database_schema(db: DatabaseManager) -> None:
             "personal_estacion",
             "destinatarios_informe",
             "destinatarios_ordenamiento",
+            "destinatarios_ciclo",
             "usuarios",
             "roles",
             "novedades",

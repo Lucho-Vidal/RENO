@@ -658,6 +658,77 @@ class RecordsService:
             self._enqueue_sync(conn, "destinatarios_ordenamiento", item_id, "UPDATE", after)
 
     # ---------------------------------------------------------
+    # Destinatarios de Personal de Ciclo CRUD
+    # ---------------------------------------------------------
+
+    def listar_destinatarios_ciclo(self, incluir_inactivos: bool = True) -> List[Dict[str, Any]]:
+        with self.db.read_connection() as conn:
+            query = "SELECT id, nombre, email, activo FROM destinatarios_ciclo"
+            if not incluir_inactivos:
+                query += " WHERE activo=1"
+            rows = conn.execute(query + " ORDER BY nombre, email").fetchall()
+            return [dict(r) for r in rows]
+
+    def crear_destinatario_ciclo(
+        self,
+        nombre: str,
+        email: str,
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> int:
+        nombre, email = (nombre or "").strip(), (email or "").strip()
+        if not email or "@" not in email:
+            raise ValueError("Ingrese un correo electrónico válido.")
+        with self.db.write_transaction() as conn:
+            cur = conn.execute(
+                "INSERT INTO destinatarios_ciclo(nombre, email) VALUES (?, ?)",
+                (nombre, email),
+            )
+            item_id = int(cur.lastrowid)
+            payload = {"nombre": nombre, "email": email, "activo": 1}
+            self._audit(conn, user_id, windows_user, "crear", "destinatario_ciclo", item_id, None, payload)
+            self._enqueue_sync(conn, "destinatarios_ciclo", email, "UPSERT", payload)
+            return item_id
+
+    def actualizar_destinatario_ciclo(
+        self,
+        item_id: int,
+        nombre: str,
+        email: str,
+        activo: int,
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> None:
+        nombre, email = (nombre or "").strip(), (email or "").strip()
+        if not email or "@" not in email:
+            raise ValueError("Ingrese un correo electrónico válido.")
+        with self.db.write_transaction() as conn:
+            before = conn.execute("SELECT id, nombre, email, activo FROM destinatarios_ciclo WHERE id=?", (item_id,)).fetchone()
+            if not before:
+                raise ValueError("El destinatario no existe.")
+            conn.execute(
+                "UPDATE destinatarios_ciclo SET nombre=?, email=?, activo=?, sync_status='pending', updated_at=? WHERE id=?",
+                (nombre, email, int(activo), self.db.now(), item_id),
+            )
+            after = {"nombre": nombre, "email": email, "activo": int(activo)}
+            self._audit(conn, user_id, windows_user, "modificar", "destinatario_ciclo", item_id, dict(before), after)
+            self._enqueue_sync(conn, "destinatarios_ciclo", email, "UPSERT", after)
+
+    def eliminar_destinatario_ciclo(
+        self,
+        item_id: int,
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> None:
+        with self.db.write_transaction() as conn:
+            before = conn.execute("SELECT id, nombre, email, activo FROM destinatarios_ciclo WHERE id=?", (item_id,)).fetchone()
+            if not before:
+                return
+            conn.execute("DELETE FROM destinatarios_ciclo WHERE id=?", (item_id,))
+            self._audit(conn, user_id, windows_user, "eliminar", "destinatario_ciclo", item_id, dict(before), None)
+            self._enqueue_sync(conn, "destinatarios_ciclo", before["email"], "DELETE", dict(before))
+
+    # ---------------------------------------------------------
     # Novedades CRUD
     # ---------------------------------------------------------
 

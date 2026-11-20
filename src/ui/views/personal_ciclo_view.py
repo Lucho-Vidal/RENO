@@ -31,6 +31,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QTableView,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -655,12 +657,147 @@ class PersonalCicloView(QWidget):
         dlg = ExportarCicloPDFDialog(
             records_service=self.records_service,
             pdf_service=self.pdf_service,
-            fecha_inicial=self.date_picker.date(),
             dotacion_inicial=self.combo_dotacion.currentText(),
             especialidad_inicial=self.combo_esp.currentText(),
+            usuario_actual=self.usuario_actual,
             parent=self,
         )
         dlg.exec()
+
+
+class DestinatariosCicloDialog(BaseDialog):
+    """ABM liviano de destinatarios exclusivos para envío de informes de Personal de Ciclo."""
+
+    def __init__(
+        self,
+        records_service: RecordsService,
+        usuario_actual: Optional[Dict[str, Any]] = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.records_service = records_service
+        self.usuario_actual = usuario_actual or {}
+        self._items: List[Dict[str, Any]] = []
+        self._edit_id: Optional[int] = None
+
+        self.setWindowTitle("Destinatarios — Personal de Ciclo")
+        self.resize(620, 420)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["NOMBRE", "CORREO ELECTRÓNICO", "ESTADO"])
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.setColumnWidth(0, 180)
+        self.table.setColumnWidth(2, 85)
+        self.table.itemSelectionChanged.connect(self._on_sel)
+        layout.addWidget(self.table, 1)
+
+        form = QFormLayout()
+        self.txt_nombre = QLineEdit()
+        self.txt_nombre.setPlaceholderText("Nombre o sector (ej. Jefatura TY)")
+        self.txt_email = QLineEdit()
+        self.txt_email.setPlaceholderText("correo@empresa.com")
+        self.chk_activo = QCheckBox("Activo")
+        self.chk_activo.setChecked(True)
+        form.addRow("Nombre:", self.txt_nombre)
+        form.addRow("Email:", self.txt_email)
+        form.addRow("", self.chk_activo)
+        layout.addLayout(form)
+
+        btns = QHBoxLayout()
+        btn_nuevo = QPushButton("➕ Nuevo")
+        btn_nuevo.setObjectName("btnSecondary")
+        btn_nuevo.clicked.connect(self._limpiar)
+        btn_guardar = QPushButton("💾 Guardar")
+        btn_guardar.clicked.connect(self._guardar)
+        btn_borrar = QPushButton("🗑️ Eliminar")
+        btn_borrar.setObjectName("btnDanger")
+        btn_borrar.clicked.connect(self._eliminar)
+        btn_cerrar = QPushButton("Cerrar")
+        btn_cerrar.setObjectName("btnSecondary")
+        btn_cerrar.clicked.connect(self.accept)
+        btns.addWidget(btn_nuevo)
+        btns.addWidget(btn_guardar)
+        btns.addWidget(btn_borrar)
+        btns.addStretch()
+        btns.addWidget(btn_cerrar)
+        layout.addLayout(btns)
+
+        self._recargar()
+
+    def _recargar(self) -> None:
+        self._items = self.records_service.listar_destinatarios_ciclo(incluir_inactivos=True)
+        self.table.setRowCount(len(self._items))
+        for r, item in enumerate(self._items):
+            self.table.setItem(r, 0, QTableWidgetItem(str(item.get("nombre") or "")))
+            self.table.setItem(r, 1, QTableWidgetItem(str(item.get("email") or "")))
+            est = QTableWidgetItem("Activo" if item.get("activo", 1) else "Inactivo")
+            est.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(r, 2, est)
+
+    def _on_sel(self) -> None:
+        rows = self.table.selectionModel().selectedRows()
+        if not rows:
+            return
+        idx = rows[0].row()
+        if 0 <= idx < len(self._items):
+            it = self._items[idx]
+            self._edit_id = int(it["id"])
+            self.txt_nombre.setText(str(it.get("nombre") or ""))
+            self.txt_email.setText(str(it.get("email") or ""))
+            self.chk_activo.setChecked(bool(it.get("activo", 1)))
+
+    def _limpiar(self) -> None:
+        self._edit_id = None
+        self.table.clearSelection()
+        self.txt_nombre.clear()
+        self.txt_email.clear()
+        self.chk_activo.setChecked(True)
+        self.txt_nombre.setFocus()
+
+    def _guardar(self) -> None:
+        try:
+            uid = self.usuario_actual.get("id")
+            win_u = self.usuario_actual.get("username")
+            if self._edit_id is None:
+                self.records_service.crear_destinatario_ciclo(
+                    self.txt_nombre.text(),
+                    self.txt_email.text(),
+                    user_id=uid,
+                    windows_user=win_u,
+                )
+            else:
+                self.records_service.actualizar_destinatario_ciclo(
+                    self._edit_id,
+                    self.txt_nombre.text(),
+                    self.txt_email.text(),
+                    1 if self.chk_activo.isChecked() else 0,
+                    user_id=uid,
+                    windows_user=win_u,
+                )
+            self._recargar()
+            self._limpiar()
+        except Exception as e:
+            QMessageBox.warning(self, "Destinatarios", str(e))
+
+    def _eliminar(self) -> None:
+        if self._edit_id is None:
+            return
+        try:
+            self.records_service.eliminar_destinatario_ciclo(
+                self._edit_id,
+                user_id=self.usuario_actual.get("id"),
+                windows_user=self.usuario_actual.get("username"),
+            )
+            self._recargar()
+            self._limpiar()
+        except Exception as e:
+            QMessageBox.warning(self, "Destinatarios", str(e))
 
 
 class ExportarCicloPDFDialog(BaseDialog):
@@ -673,19 +810,22 @@ class ExportarCicloPDFDialog(BaseDialog):
         fecha_inicial: Optional[QDate] = None,
         dotacion_inicial: str = "Todas",
         especialidad_inicial: str = "Todas",
+        usuario_actual: Optional[Dict[str, Any]] = None,
         parent=None,
     ):
         super().__init__(parent)
         self.records_service = records_service
         self.pdf_service = pdf_service
+        self.usuario_actual = usuario_actual or {}
         self.setWindowTitle("Exportar Personal de Ciclo a PDF (Horizontal)")
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(520)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
 
         form = QFormLayout()
-        f_base = fecha_inicial if (fecha_inicial and fecha_inicial.isValid()) else QDate.currentDate()
+        # Por defecto: fecha de mañana (hoy + 1 día)
+        f_base = fecha_inicial if (fecha_inicial and fecha_inicial.isValid()) else QDate.currentDate().addDays(1)
 
         self.date_desde = QDateEdit()
         self.date_desde.setCalendarPopup(True)
@@ -698,6 +838,9 @@ class ExportarCicloPDFDialog(BaseDialog):
         self.date_hasta.setDisplayFormat("dd/MM/yyyy")
         self.date_hasta.setDate(f_base)
         form.addRow("Fecha hasta:", self.date_hasta)
+
+        # Al cambiar fecha desde, actualizar fecha hasta a la misma fecha
+        self.date_desde.dateChanged.connect(self.date_hasta.setDate)
 
         self.combo_dot = QComboBox()
         self.combo_dot.addItem("Todas")
@@ -719,25 +862,23 @@ class ExportarCicloPDFDialog(BaseDialog):
 
         layout.addLayout(form)
 
-        # Sección Outlook
-        grp_ol = QGroupBox("Envío por Microsoft Outlook (Opcional)")
+        # Sección Outlook (lista independiente destinatarios_ciclo)
+        grp_ol = QGroupBox("Envío por Microsoft Outlook (Lista Personal de Ciclo)")
         lay_ol = QVBoxLayout(grp_ol)
 
         self.chk_outlook = QCheckBox("Enviar PDF adjunto por Outlook")
         lay_ol.addWidget(self.chk_outlook)
 
-        dest_default = ""
-        try:
-            dests = self.records_service.listar_destinatarios_informe(incluir_inactivos=False)
-            dest_default = "; ".join(str(d.get("email") or "").strip() for d in dests if d.get("email"))
-        except Exception:
-            dest_default = ""
-
         h_dest = QHBoxLayout()
         h_dest.addWidget(QLabel("Destinatarios (;):"))
-        self.txt_dest = QLineEdit(dest_default)
+        self.txt_dest = QLineEdit()
         self.txt_dest.setPlaceholderText("correo1@empresa.com; correo2@empresa.com")
         h_dest.addWidget(self.txt_dest, 1)
+        self.btn_dest = QPushButton("⚙️ Lista")
+        self.btn_dest.setObjectName("btnSecondary")
+        self.btn_dest.setToolTip("Administrar lista de destinatarios de Personal de Ciclo")
+        self.btn_dest.clicked.connect(self._administrar_destinatarios)
+        h_dest.addWidget(self.btn_dest)
         lay_ol.addLayout(h_dest)
 
         self.chk_borrador = QCheckBox("Abrir en Outlook como borrador antes de enviar")
@@ -746,6 +887,7 @@ class ExportarCicloPDFDialog(BaseDialog):
 
         layout.addWidget(grp_ol)
 
+        self._cargar_destinatarios_ciclo()
         self.chk_outlook.toggled.connect(self._toggle_outlook)
         self._toggle_outlook(False)
 
@@ -760,8 +902,25 @@ class ExportarCicloPDFDialog(BaseDialog):
         btns.addWidget(btn_export)
         layout.addLayout(btns)
 
+    def _cargar_destinatarios_ciclo(self) -> None:
+        try:
+            dests = self.records_service.listar_destinatarios_ciclo(incluir_inactivos=False)
+            self.txt_dest.setText("; ".join(str(d.get("email") or "").strip() for d in dests if d.get("email")))
+        except Exception as e:
+            logger.warning("No se pudo cargar destinatarios_ciclo: %s", e)
+
+    def _administrar_destinatarios(self) -> None:
+        dlg = DestinatariosCicloDialog(
+            records_service=self.records_service,
+            usuario_actual=self.usuario_actual,
+            parent=self,
+        )
+        dlg.exec()
+        self._cargar_destinatarios_ciclo()
+
     def _toggle_outlook(self, checked: bool) -> None:
         self.txt_dest.setEnabled(checked)
+        self.btn_dest.setEnabled(checked)
         self.chk_borrador.setEnabled(checked)
 
     def _ejecutar(self) -> None:
@@ -818,39 +977,50 @@ class ExportarCicloPDFDialog(BaseDialog):
                 especialidad=esp_filtro,
             )
 
-            extra_msg = ""
             if enviar_ol:
                 from src.services.mail_service import MailService
 
                 dot_txt = dot_filtro or "Todas"
                 asunto = f"Personal de Ciclo - Dotación {dot_txt} ({f_desde} al {f_hasta})"
-                cuerpo = "\n".join([
-                    "Se adjunta el informe en PDF (hoja horizontal) de Personal de Ciclo.",
-                    f"Período: {f_desde} al {f_hasta}",
-                    f"Dotación: {dot_txt}",
-                    f"Especialidad: {esp_filtro or 'Todas'}",
-                ])
+                cuerpo_html = (
+                    f"<p>Se adjunta el informe en PDF (hoja horizontal) de <b>Personal de Ciclo</b>.</p>"
+                    f"<ul>"
+                    f"<li><b>Período:</b> {f_desde} al {f_hasta}</li>"
+                    f"<li><b>Dotación:</b> {dot_txt}</li>"
+                    f"<li><b>Especialidad:</b> {esp_filtro or 'Todas'}</li>"
+                    f"</ul>"
+                )
                 ok, msg_ol = MailService.crear_borrador_outlook(
                     destinatarios=lista_dest,
                     asunto=asunto,
-                    cuerpo_texto=cuerpo,
+                    cuerpo_html=cuerpo_html,
                     adjuntos=[pdf_out],
                     enviar_directo=not abrir_borrador,
                 )
                 if not ok:
                     QMessageBox.warning(
                         self,
-                        "PDF generado — Aviso Outlook",
-                        f"El PDF se guardó en:\n{pdf_out}\n\nPero Outlook devolvió un aviso:\n{msg_ol}",
+                        "PDF generado — Error al abrir Outlook",
+                        f"El PDF se guardó en:\n{pdf_out}\n\nNo se pudo abrir/enviar en Outlook:\n{msg_ol}",
                     )
                     self.accept()
                     return
-                extra_msg = f"\n\n{msg_ol}"
+                if abrir_borrador:
+                    # Cerrar diálogo sin tapar la ventana de borrador de Outlook
+                    self.accept()
+                    return
+                QMessageBox.information(
+                    self,
+                    "Exportación y Envío Exitosos",
+                    f"PDF horizontal generado correctamente en:\n{pdf_out}\n\n{msg_ol}",
+                )
+                self.accept()
+                return
 
             QMessageBox.information(
                 self,
                 "Exportación Exitosa",
-                f"PDF horizontal generado correctamente en:\n{pdf_out}{extra_msg}",
+                f"PDF horizontal generado correctamente en:\n{pdf_out}",
             )
             self.accept()
         except Exception as e:

@@ -71,7 +71,14 @@ class MailService:
                     firma_existente = getattr(mensaje, "HTMLBody", "") or ""
                     mensaje.HTMLBody = cuerpo_html + firma_existente
                 elif cuerpo_texto:
-                    mensaje.Body = cuerpo_texto + (getattr(mensaje, "Body", "") or "")
+                    firma_existente = getattr(mensaje, "Body", "") or ""
+                    mensaje.Body = cuerpo_texto + ("\r\n" + firma_existente if firma_existente else "")
+                try:
+                    inspector = getattr(mensaje, "GetInspector", None)
+                    if inspector is not None:
+                        inspector.Activate()
+                except Exception:
+                    pass
                 logger.info("Borrador de correo abierto exitosamente en Microsoft Outlook.")
                 return True, "Se abrió el correo en Microsoft Outlook listo para enviar."
         except Exception as e:
