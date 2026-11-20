@@ -484,7 +484,7 @@ class CalendarioCicloDialog(BaseMaximizedDialog):
         self.table_view.setColumnWidth(0, 45)   # DÍA
         self.table_view.setColumnWidth(1, 85)   # FECHA
         self.table_view.setColumnWidth(2, 75)   # DÍA SEM.
-        self.table_view.setColumnWidth(3, 110)  # ESTADO
+        self.table_view.setColumnWidth(3, 175)  # ESTADO
         self.table_view.setColumnWidth(4, 120)  # HORA DISPONIBLE
         self.table_view.setColumnWidth(5, 60)   # TOMA
         self.table_view.setColumnWidth(6, 60)   # DEJA

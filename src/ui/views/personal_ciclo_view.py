@@ -11,7 +11,7 @@ import re
 import unicodedata
 
 from PySide6.QtCore import QByteArray, QDate, QMimeData, QPoint, Qt, Signal
-from PySide6.QtGui import QDrag
+from PySide6.QtGui import QColor, QDrag
 from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
@@ -269,8 +269,8 @@ class PersonalCicloView(QWidget):
         lay_libres.addWidget(self.table_libres)
         splitter.addWidget(grp_libres)
 
-        # Tabla Inferior: Personal Ocupado / Con Relevo
-        grp_ocupados = QGroupBox("Personal de Ciclo ASIGNADO (Arrastre hacia arriba para liberar del relevo)")
+        # Tabla Inferior: Personal Ocupado / Con Relevo o Novedad Activa
+        grp_ocupados = QGroupBox("Personal de Ciclo ASIGNADO / CON NOVEDAD ACTIVA (Arrastre un relevo hacia arriba para liberarlo)")
         lay_ocupados = QVBoxLayout(grp_ocupados)
         headers_ocupados = [
             "LEGAJO", "APELLIDOS Y NOMBRES", "ESPECIALIDAD", "DOTACIÓN", "REEMPLAZA A (TITULAR)",
@@ -281,7 +281,19 @@ class PersonalCicloView(QWidget):
             "turno_titular", "tipo_novedad", "fecha_inicio_relevo", "fecha_fin_relevo",
         ]
 
-        self.model_ocupados = BaseTableModel(headers_ocupados, keys_ocupados, parent=self)
+        def _colores_ocupados(row_item: Dict[str, Any], col_idx: int):
+            if row_item.get("_es_novedad_propia"):
+                from src.core.theme import obtener_tema_visual
+                es_oscuro = obtener_tema_visual() == "oscuro"
+                return (QColor("#3D1B1B"), QColor("#FCA5A5")) if es_oscuro else (QColor("#FFEBEE"), QColor("#B71C1C"))
+            return None
+
+        self.model_ocupados = BaseTableModel(
+            headers_ocupados,
+            keys_ocupados,
+            conditional_colors=_colores_ocupados,
+            parent=self,
+        )
         self.proxy_ocupados = MultiFilterProxyModel(self)
         self.proxy_ocupados.setSourceModel(self.model_ocupados)
         self.table_ocupados = DragDropCicloTableView("OCUPADOS", parent=self)
@@ -325,7 +337,20 @@ class PersonalCicloView(QWidget):
             res = self.records_service.obtener_estado_personal_ciclo(f_str, dotacion=dot, especialidad=esp)
             libres_ordenados = sorted(res.get("libres", []), key=_clave_orden_franco)
             self.model_libres.set_data(libres_ordenados)
-            self.model_ocupados.set_data(res.get("ocupados", []))
+
+            filas_ocupados = list(res.get("ocupados", []))
+            for emp_nov in res.get("con_novedad", []):
+                item_nov = dict(emp_nov)
+                item_nov["_es_novedad_propia"] = True
+                nov_id = emp_nov.get("novedad_propia_id", "")
+                item_nov["reemplaza_a"] = f"NOVEDAD PROPIA #{nov_id}" if nov_id else "NOVEDAD PROPIA"
+                item_nov["turno_titular"] = "-"
+                item_nov["tipo_novedad"] = emp_nov.get("novedad_propia") or "-"
+                item_nov["fecha_inicio_relevo"] = emp_nov.get("novedad_fecha_inicio") or "-"
+                item_nov["fecha_fin_relevo"] = emp_nov.get("novedad_fecha_fin") or "Sin fecha fin"
+                filas_ocupados.append(item_nov)
+
+            self.model_ocupados.set_data(filas_ocupados)
         except Exception as e:
             logger.error(f"Error al consultar personal de ciclo: {e}")
 
@@ -413,6 +438,17 @@ class PersonalCicloView(QWidget):
         """Al arrastrar un agente ocupado hacia la grilla de libres: liberar del relevo."""
         if not self._can("reemplazos.asignar"):
             QMessageBox.warning(self, "Permiso Denegado", "No posee permiso para modificar o desasignar personal de ciclo.")
+            return
+
+        if emp.get("_es_novedad_propia"):
+            nov_id = emp.get("novedad_propia_id", "")
+            nov_tipo = emp.get("novedad_propia") or emp.get("tipo_novedad") or ""
+            QMessageBox.information(
+                self,
+                "Novedad Propia Activa",
+                f"El agente <b>{emp.get('apellidos_nombres', '')}</b> posee una novedad propia activa "
+                f"(<b>#{nov_id} - {nov_tipo}</b>). Para liberarlo, cierre o modifique la novedad en la pestaña Novedades.",
+            )
             return
 
         reemplazo_id = emp.get("reemplazo_id")

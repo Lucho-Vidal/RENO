@@ -1944,7 +1944,7 @@ class RecordsService:
             jornada_db = jornadas_map.get(f_iso)
 
             if nov_propia_dia:
-                estado = f"Novedad ({nov_propia_dia['novedad']})"
+                estado = f"Novedad #{nov_propia_dia['id']} ({nov_propia_dia['novedad']})"
                 es_franco = False
                 novedad_id = nov_propia_dia["id"]
                 reemplaza_a = "-"
