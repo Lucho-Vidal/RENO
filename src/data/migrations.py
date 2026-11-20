@@ -426,6 +426,45 @@ def init_database_schema(db: DatabaseManager) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_via_conocimientos_legajo ON via_conocimientos(legajo);
             CREATE INDEX IF NOT EXISTS idx_via_conocimientos_sector ON via_conocimientos(sector_id);
+
+            -- Registro de Remociones periódicas (cambios de turno y dotación)
+            CREATE TABLE IF NOT EXISTS remociones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre TEXT NOT NULL,
+                fecha_vigencia TEXT NOT NULL,
+                observaciones TEXT NOT NULL DEFAULT '',
+                cantidad_cambios INTEGER NOT NULL DEFAULT 0,
+                usuario_id INTEGER REFERENCES usuarios(id),
+                usuario_windows TEXT,
+                sync_status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+            );
+
+            -- Historial cronológico de turnos y dotaciones por empleado
+            CREATE TABLE IF NOT EXISTS empleado_historial_turnos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                legajo INTEGER NOT NULL REFERENCES empleados(legajo) ON DELETE CASCADE,
+                remocion_id INTEGER REFERENCES remociones(id) ON DELETE SET NULL,
+                remocion_nombre TEXT NOT NULL DEFAULT '',
+                dotacion TEXT NOT NULL DEFAULT '',
+                turnos TEXT NOT NULL DEFAULT '',
+                franco TEXT NOT NULL DEFAULT '',
+                franco_horario TEXT NOT NULL DEFAULT '',
+                especialidad TEXT NOT NULL DEFAULT '',
+                fecha_desde TEXT NOT NULL,
+                fecha_hasta TEXT,
+                motivo TEXT NOT NULL DEFAULT 'Cambio individual',
+                observaciones TEXT NOT NULL DEFAULT '',
+                usuario_id INTEGER REFERENCES usuarios(id),
+                usuario_windows TEXT,
+                sync_status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_hist_turnos_legajo ON empleado_historial_turnos(legajo, fecha_desde DESC);
+            CREATE INDEX IF NOT EXISTS idx_hist_turnos_remocion ON empleado_historial_turnos(remocion_id);
             """
         )
 
@@ -452,6 +491,8 @@ def init_database_schema(db: DatabaseManager) -> None:
             "ordenamiento_tramos",
             "via_sectores",
             "via_conocimientos",
+            "remociones",
+            "empleado_historial_turnos",
         ]
         for t in tablas_sincronizables:
             cols = {row[1] for row in conn.execute(f"PRAGMA table_info({t});").fetchall()}
@@ -543,6 +584,34 @@ def init_database_schema(db: DatabaseManager) -> None:
                     for sec in SECTORES_VIA_BASE
                 ],
             )
+
+        # Semilla inicial no destructiva del historial de turnos si está vacío y hay empleados activos
+        cnt_hist = conn.execute("SELECT COUNT(*) FROM empleado_historial_turnos;").fetchone()[0]
+        if cnt_hist == 0:
+            hoy_iso = datetime.now().strftime("%Y-%m-%d")
+            emps_act = conn.execute(
+                """SELECT legajo, dotacion, turnos, franco, franco_horario, especialidad
+                   FROM empleados WHERE activo = 1"""
+            ).fetchall()
+            if emps_act:
+                conn.executemany(
+                    """INSERT INTO empleado_historial_turnos
+                       (legajo, remocion_nombre, dotacion, turnos, franco, franco_horario,
+                        especialidad, fecha_desde, fecha_hasta, motivo, observaciones)
+                       VALUES (?, 'Padrón inicial', ?, ?, ?, ?, ?, ?, NULL, 'Padrón inicial', '')""",
+                    [
+                        (
+                            int(e[0]),
+                            e[1] or "",
+                            e[2] or "",
+                            e[3] or "",
+                            e[4] or "",
+                            e[5] or "",
+                            hoy_iso,
+                        )
+                        for e in emps_act
+                    ],
+                )
 
         # Poblar tren_paradas automáticamente desde turnos_vueltas si está vacía
         cnt_paradas = conn.execute("SELECT COUNT(*) FROM tren_paradas;").fetchone()[0]

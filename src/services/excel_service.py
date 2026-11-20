@@ -1113,3 +1113,56 @@ class ExcelService:
         wb.save(out_file)
         return str(out_file)
 
+    def export_historial_turnos(
+        self,
+        output_path: str,
+        filas: List[Dict[str, Any]],
+        titulo: str = "Historial de Turnos",
+    ) -> str:
+        """Exporta el historial de turnos (de un agente o de una remoción) a Excel."""
+        out_file = Path(output_path)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = (titulo or "Historial de Turnos")[:31]
+
+        headers = [
+            "LEGAJO", "APELLIDOS Y NOMBRES", "REMOCIÓN", "DESDE", "HASTA",
+            "TURNO", "DOTACIÓN", "FRANCO", "HOR. FRANCO", "ESPECIALIDAD",
+            "MOTIVO", "OBSERVACIONES",
+        ]
+        ws.append(headers)
+        header_fill = PatternFill(start_color="1F3A5F", end_color="1F3A5F", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF")
+        for c_idx in range(1, len(headers) + 1):
+            cell = ws.cell(row=1, column=c_idx)
+            cell.fill = header_fill
+            cell.font = header_font
+
+        for f in filas:
+            ws.append([
+                f.get("legajo", ""),
+                f.get("apellidos_nombres", ""),
+                f.get("remocion_nombre", "") or "-",
+                f.get("fecha_desde_display") or f.get("fecha_desde", ""),
+                f.get("fecha_hasta_display") or f.get("fecha_hasta") or "Vigente",
+                f.get("turnos", ""),
+                f.get("dotacion", ""),
+                f.get("franco", ""),
+                f.get("franco_horario", ""),
+                f.get("especialidad", ""),
+                f.get("motivo", ""),
+                f.get("observaciones", ""),
+            ])
+
+        ws.freeze_panes = "A2"
+        if ws.max_row > 1:
+            ws.auto_filter.ref = ws.dimensions
+        for idx, h in enumerate(headers, start=1):
+            ws.column_dimensions[get_column_letter(idx)].width = 26 if idx in (2, 3, 12) else max(12, len(h) + 3)
+
+        wb.save(out_file)
+        return str(out_file)
+
+

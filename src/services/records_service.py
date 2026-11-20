@@ -522,6 +522,29 @@ class RecordsService:
             except sqlite3.IntegrityError:
                 raise ValueError(f"Ya existe un empleado con el legajo {legajo}.")
             after = dict(conn.execute("SELECT * FROM empleados WHERE id=?", (empleado_id,)).fetchone())
+            campos_hist = ("dotacion", "turnos", "franco", "franco_horario", "especialidad")
+            cambio_relevante = any(
+                str(before[c] or "").strip() != str(after.get(c) or "").strip()
+                for c in campos_hist
+            )
+            if cambio_relevante:
+                self._registrar_cambio_historial_conn(
+                    conn,
+                    legajo=int(after["legajo"]),
+                    dotacion=after.get("dotacion") or "",
+                    turnos=after.get("turnos") or "",
+                    franco=after.get("franco") or "",
+                    franco_horario=after.get("franco_horario") or "",
+                    especialidad=after.get("especialidad") or "",
+                    fecha_desde=date.today().strftime("%Y-%m-%d"),
+                    remocion_id=None,
+                    remocion_nombre="",
+                    motivo="Cambio individual",
+                    observaciones=f"Anterior: {before['turnos'] or '-'} ({before['dotacion'] or '-'})",
+                    user_id=user_id,
+                    windows_user=windows_user,
+                    datos_anteriores=dict(before),
+                )
             self._audit(conn, user_id, windows_user, "modificar", "empleado", empleado_id, dict(before), after)
             self._enqueue_sync(conn, "empleados", empleado_id, "UPDATE", after)
 
@@ -5932,3 +5955,520 @@ class RecordsService:
                 windows_user=windows_user,
             )
         return total
+
+    # =========================================================================
+    # REMOCIONES E HISTORIAL DE TURNOS DEL PERSONAL
+    # =========================================================================
+
+    def _registrar_cambio_historial_conn(
+        self,
+        conn: sqlite3.Connection,
+        legajo: int,
+        dotacion: str,
+        turnos: str,
+        franco: str,
+        franco_horario: str,
+        especialidad: str,
+        fecha_desde: str,
+        remocion_id: Optional[int] = None,
+        remocion_nombre: str = "",
+        motivo: str = "Cambio individual",
+        observaciones: str = "",
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+        datos_anteriores: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """Cierra el período abierto previo del legajo (si existe) y registra el nuevo período vigente."""
+        ahora = self.db.now()
+        win_u = windows_user or obtener_usuario_windows()
+        f_desde_dt = parsear_fecha(fecha_desde, "Fecha desde", obligatorio=True).date()
+        f_desde_iso = f_desde_dt.strftime("%Y-%m-%d")
+        f_cierre_prev = (f_desde_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        abierto = conn.execute(
+            """SELECT * FROM empleado_historial_turnos
+               WHERE legajo = ? AND (fecha_hasta IS NULL OR TRIM(fecha_hasta) = '')
+               ORDER BY fecha_desde DESC, id DESC LIMIT 1""",
+            (int(legajo),),
+        ).fetchone()
+
+        if abierto:
+            # Si fecha_cierre < fecha_desde del abierto, cerrar con el mismo día del abierto
+            cierre_final = f_cierre_prev if f_cierre_prev >= str(abierto["fecha_desde"]) else str(abierto["fecha_desde"])
+            conn.execute(
+                """UPDATE empleado_historial_turnos
+                   SET fecha_hasta = ?, sync_status = 'pending', updated_at = ?
+                   WHERE id = ?""",
+                (cierre_final, ahora, abierto["id"]),
+            )
+            ab_after = dict(conn.execute("SELECT * FROM empleado_historial_turnos WHERE id = ?", (abierto["id"],)).fetchone())
+            self._enqueue_sync(conn, "empleado_historial_turnos", abierto["id"], "UPDATE", ab_after)
+        elif datos_anteriores:
+            # Si el empleado no tenía registro previo en el historial, guardar su estado anterior cerrado
+            conn.execute(
+                """INSERT INTO empleado_historial_turnos
+                   (legajo, remocion_id, remocion_nombre, dotacion, turnos, franco, franco_horario,
+                    especialidad, fecha_desde, fecha_hasta, motivo, observaciones, usuario_id, usuario_windows,
+                    sync_status, created_at, updated_at)
+                   VALUES (?, NULL, 'Anterior', ?, ?, ?, ?, ?, ?, ?, 'Estado previo', '', ?, ?, 'pending', ?, ?)""",
+                (
+                    int(legajo),
+                    str(datos_anteriores.get("dotacion") or ""),
+                    str(datos_anteriores.get("turnos") or ""),
+                    str(datos_anteriores.get("franco") or ""),
+                    str(datos_anteriores.get("franco_horario") or ""),
+                    str(datos_anteriores.get("especialidad") or ""),
+                    f_cierre_prev,
+                    f_cierre_prev,
+                    user_id,
+                    win_u,
+                    ahora,
+                    ahora,
+                ),
+            )
+
+        cur = conn.execute(
+            """INSERT INTO empleado_historial_turnos
+               (legajo, remocion_id, remocion_nombre, dotacion, turnos, franco, franco_horario,
+                especialidad, fecha_desde, fecha_hasta, motivo, observaciones, usuario_id, usuario_windows,
+                sync_status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 'pending', ?, ?)""",
+            (
+                int(legajo),
+                remocion_id,
+                (remocion_nombre or "").strip(),
+                (dotacion or "").strip(),
+                (turnos or "").strip(),
+                (franco or "").strip(),
+                (franco_horario or "").strip(),
+                (especialidad or "").strip(),
+                f_desde_iso,
+                (motivo or "Cambio individual").strip(),
+                (observaciones or "").strip(),
+                user_id,
+                win_u,
+                ahora,
+                ahora,
+            ),
+        )
+        new_id = int(cur.lastrowid)
+        after = dict(conn.execute("SELECT * FROM empleado_historial_turnos WHERE id = ?", (new_id,)).fetchone())
+        self._enqueue_sync(conn, "empleado_historial_turnos", new_id, "INSERT", after)
+        return new_id
+
+    @staticmethod
+    def _fmt_fecha_corta(iso_val: Any) -> str:
+        s = str(iso_val or "").strip()
+        if not s:
+            return ""
+        if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+            return f"{s[8:10]}/{s[5:7]}/{s[0:4]}"
+        return s
+
+    def listar_historial_turnos_empleado(self, legajo: int) -> List[Dict[str, Any]]:
+        """Devuelve el historial cronológico de turnos y dotaciones de un empleado (más reciente primero)."""
+        with self.db.read_connection() as conn:
+            rows = conn.execute(
+                """SELECT h.*, e.apellidos_nombres
+                   FROM empleado_historial_turnos h
+                   LEFT JOIN empleados e ON e.legajo = h.legajo
+                   WHERE h.legajo = ?
+                   ORDER BY h.fecha_desde DESC, h.id DESC""",
+                (int(legajo),),
+            ).fetchall()
+        res: List[Dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            d["fecha_desde_display"] = self._fmt_fecha_corta(d.get("fecha_desde"))
+            f_h = (d.get("fecha_hasta") or "").strip()
+            d["fecha_hasta_display"] = self._fmt_fecha_corta(f_h) if f_h else "Vigente"
+            d["es_vigente"] = not bool(f_h)
+            res.append(d)
+        return res
+
+    def agregar_historial_turno_manual(
+        self,
+        legajo: int,
+        data: Dict[str, Any],
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> int:
+        """Agrega un registro histórico (p. ej. remoción pasada) para un empleado."""
+        f_desde = parsear_fecha(data.get("fecha_desde"), "Fecha desde", obligatorio=True).date()
+        f_hasta_raw = str(data.get("fecha_hasta") or "").strip()
+        f_hasta_iso: Optional[str] = None
+        if f_hasta_raw and f_hasta_raw != "-":
+            f_hasta_dt = parsear_fecha(f_hasta_raw, "Fecha hasta", obligatorio=False)
+            if f_hasta_dt:
+                if f_hasta_dt.date() < f_desde:
+                    raise ValueError("La fecha hasta no puede ser anterior a la fecha desde.")
+                f_hasta_iso = f_hasta_dt.date().strftime("%Y-%m-%d")
+
+        ahora = self.db.now()
+        win_u = windows_user or obtener_usuario_windows()
+        with self.db.write_transaction() as conn:
+            cur = conn.execute(
+                """INSERT INTO empleado_historial_turnos
+                   (legajo, remocion_id, remocion_nombre, dotacion, turnos, franco, franco_horario,
+                    especialidad, fecha_desde, fecha_hasta, motivo, observaciones, usuario_id, usuario_windows,
+                    sync_status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+                (
+                    int(legajo),
+                    data.get("remocion_id"),
+                    str(data.get("remocion_nombre") or "").strip(),
+                    str(data.get("dotacion") or "").strip(),
+                    str(data.get("turnos") or "").strip(),
+                    str(data.get("franco") or "").strip(),
+                    str(data.get("franco_horario") or "").strip(),
+                    str(data.get("especialidad") or "").strip(),
+                    f_desde.strftime("%Y-%m-%d"),
+                    f_hasta_iso,
+                    str(data.get("motivo") or "Histórico manual").strip(),
+                    str(data.get("observaciones") or "").strip(),
+                    user_id,
+                    win_u,
+                    ahora,
+                    ahora,
+                ),
+            )
+            new_id = int(cur.lastrowid)
+            after = dict(conn.execute("SELECT * FROM empleado_historial_turnos WHERE id = ?", (new_id,)).fetchone())
+            self._audit(conn, user_id, win_u, "crear", "empleado_historial_turno", new_id, None, after)
+            self._enqueue_sync(conn, "empleado_historial_turnos", new_id, "INSERT", after)
+            return new_id
+
+    def eliminar_historial_turno(
+        self,
+        historial_id: int,
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> None:
+        win_u = windows_user or obtener_usuario_windows()
+        with self.db.write_transaction() as conn:
+            before = conn.execute("SELECT * FROM empleado_historial_turnos WHERE id = ?", (int(historial_id),)).fetchone()
+            if not before:
+                return
+            conn.execute("DELETE FROM empleado_historial_turnos WHERE id = ?", (int(historial_id),))
+            self._audit(conn, user_id, win_u, "eliminar", "empleado_historial_turno", int(historial_id), dict(before), None)
+            self._enqueue_sync(conn, "empleado_historial_turnos", int(historial_id), "DELETE", dict(before))
+
+    def listar_remociones(self) -> List[Dict[str, Any]]:
+        """Lista todas las remociones registradas ordenadas de la más reciente a la más antigua."""
+        with self.db.read_connection() as conn:
+            rows = conn.execute(
+                """SELECT r.*,
+                          (SELECT COUNT(*) FROM empleado_historial_turnos h WHERE h.remocion_id = r.id) AS total_registros
+                   FROM remociones r
+                   ORDER BY r.fecha_vigencia DESC, r.id DESC"""
+            ).fetchall()
+        res = []
+        for r in rows:
+            d = dict(r)
+            d["fecha_vigencia_display"] = self._fmt_fecha_corta(d.get("fecha_vigencia"))
+            res.append(d)
+        return res
+
+    def listar_cambios_remocion(self, remocion_id: int) -> List[Dict[str, Any]]:
+        """Devuelve el detalle de todos los agentes registrados en una remoción específica."""
+        with self.db.read_connection() as conn:
+            rows = conn.execute(
+                """SELECT h.*, e.apellidos_nombres
+                   FROM empleado_historial_turnos h
+                   LEFT JOIN empleados e ON e.legajo = h.legajo
+                   WHERE h.remocion_id = ?
+                   ORDER BY h.dotacion ASC, e.apellidos_nombres ASC, h.legajo ASC""",
+                (int(remocion_id),),
+            ).fetchall()
+        res = []
+        for r in rows:
+            d = dict(r)
+            d["fecha_desde_display"] = self._fmt_fecha_corta(d.get("fecha_desde"))
+            f_h = (d.get("fecha_hasta") or "").strip()
+            d["fecha_hasta_display"] = self._fmt_fecha_corta(f_h) if f_h else "Vigente"
+            res.append(d)
+        return res
+
+    def registrar_snapshot_remocion(
+        self,
+        nombre: str,
+        fecha_vigencia: str,
+        observaciones: str = "",
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Crea una Remoción guardando la foto del padrón activo actual en el historial."""
+        nombre = (nombre or "").strip()
+        if not nombre:
+            raise ValueError("Debe ingresar un nombre para la remoción (ej. Remoción 2° Semestre 2026).")
+        f_vig = parsear_fecha(fecha_vigencia, "Fecha de vigencia", obligatorio=True).date()
+        f_vig_iso = f_vig.strftime("%Y-%m-%d")
+        ahora = self.db.now()
+        win_u = windows_user or obtener_usuario_windows()
+
+        with self.db.write_transaction() as conn:
+            cur = conn.execute(
+                """INSERT INTO remociones
+                   (nombre, fecha_vigencia, observaciones, cantidad_cambios, usuario_id, usuario_windows,
+                    sync_status, created_at, updated_at)
+                   VALUES (?, ?, ?, 0, ?, ?, 'pending', ?, ?)""",
+                (nombre, f_vig_iso, (observaciones or "").strip(), user_id, win_u, ahora, ahora),
+            )
+            rem_id = int(cur.lastrowid)
+
+            emps = conn.execute(
+                """SELECT legajo, apellidos_nombres, especialidad, dotacion, turnos, franco, franco_horario
+                   FROM empleados WHERE activo = 1 ORDER BY dotacion, apellidos_nombres"""
+            ).fetchall()
+
+            registrados = 0
+            for e in emps:
+                self._registrar_cambio_historial_conn(
+                    conn,
+                    legajo=int(e["legajo"]),
+                    dotacion=e["dotacion"] or "",
+                    turnos=e["turnos"] or "",
+                    franco=e["franco"] or "",
+                    franco_horario=e["franco_horario"] or "",
+                    especialidad=e["especialidad"] or "",
+                    fecha_desde=f_vig_iso,
+                    remocion_id=rem_id,
+                    remocion_nombre=nombre,
+                    motivo="Remoción (Snapshot)",
+                    observaciones=observaciones,
+                    user_id=user_id,
+                    windows_user=win_u,
+                )
+                registrados += 1
+
+            conn.execute(
+                "UPDATE remociones SET cantidad_cambios = ?, updated_at = ? WHERE id = ?",
+                (registrados, ahora, rem_id),
+            )
+            after_rem = dict(conn.execute("SELECT * FROM remociones WHERE id = ?", (rem_id,)).fetchone())
+            self._audit(conn, user_id, win_u, "crear", "remocion", rem_id, None, after_rem)
+            self._enqueue_sync(conn, "remociones", rem_id, "INSERT", after_rem)
+
+        return {"remocion_id": rem_id, "registrados": registrados}
+
+    def _leer_filas_excel_base(self, file_path: str) -> List[Dict[str, Any]]:
+        import openpyxl
+
+        wb = openpyxl.load_workbook(file_path, data_only=True)
+        sheet_name = "BASE" if "BASE" in wb.sheetnames else wb.sheetnames[0]
+        ws = wb[sheet_name]
+        headers = [str(cell.value).strip().upper() if cell.value is not None else "" for cell in ws[1]]
+        header_map = {name: idx for idx, name in enumerate(headers) if name}
+
+        legajo_idx = header_map.get("LEGAJO", 0)
+        nombre_idx = header_map.get("APELLIDOS Y NOMBRES", 1)
+        esp_idx = header_map.get("ESPECIALIDAD", 2)
+        dot_idx = header_map.get("DOTACION", header_map.get("DOTACIÓN", 3))
+        turnos_idx = header_map.get("TURNOS", header_map.get("TURNO", 4))
+        franco_idx = header_map.get("FRANCO", 5)
+        franco_h_idx = header_map.get("HORARIO FRANCO", header_map.get("FRANCO_HORARIO"))
+        jornada_idx = header_map.get("JORNADA HS", header_map.get("JORNADA_HORAS"))
+
+        filas: List[Dict[str, Any]] = []
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if not row or legajo_idx >= len(row) or row[legajo_idx] is None:
+                continue
+            try:
+                legajo = int(str(row[legajo_idx]).strip())
+            except (ValueError, TypeError):
+                continue
+            nombre = str(row[nombre_idx] or "").strip() if nombre_idx < len(row) else ""
+            if not nombre:
+                continue
+            jornada_val = 6
+            if jornada_idx is not None and jornada_idx < len(row):
+                try:
+                    jornada_val = 7 if int(row[jornada_idx] or 6) == 7 else 6
+                except (ValueError, TypeError):
+                    jornada_val = 6
+            filas.append({
+                "legajo": legajo,
+                "apellidos_nombres": nombre,
+                "especialidad": str(row[esp_idx] or "").strip() if esp_idx < len(row) else "",
+                "dotacion": str(row[dot_idx] or "").strip() if dot_idx < len(row) else "",
+                "turnos": str(row[turnos_idx] or "").strip() if turnos_idx < len(row) else "",
+                "franco": str(row[franco_idx] or "").strip() if franco_idx < len(row) else "",
+                "franco_horario": (
+                    str(row[franco_h_idx] or "").strip()
+                    if (franco_h_idx is not None and franco_h_idx < len(row))
+                    else ""
+                ),
+                "jornada_horas": jornada_val,
+            })
+        return filas
+
+    def previsualizar_remocion_desde_excel(self, file_path: str) -> Dict[str, Any]:
+        """Compara un Excel BASE contra el padrón actual y clasifica cambios de turno/dotación/altas."""
+        filas_xlsx = self._leer_filas_excel_base(file_path)
+        with self.db.read_connection() as conn:
+            actuales = {
+                int(r["legajo"]): dict(r)
+                for r in conn.execute(
+                    "SELECT id, legajo, apellidos_nombres, especialidad, dotacion, turnos, franco, franco_horario, jornada_horas FROM empleados"
+                ).fetchall()
+            }
+
+        cambios: List[Dict[str, Any]] = []
+        altas: List[Dict[str, Any]] = []
+        sin_cambios = 0
+
+        for f in filas_xlsx:
+            leg = f["legajo"]
+            act = actuales.get(leg)
+            if not act:
+                altas.append(f)
+                continue
+            cambio_turno = str(act.get("turnos") or "").strip() != f["turnos"]
+            cambio_dot = str(act.get("dotacion") or "").strip() != f["dotacion"]
+            cambio_franco = str(act.get("franco") or "").strip() != f["franco"]
+            cambio_esp = str(act.get("especialidad") or "").strip() != f["especialidad"]
+            if cambio_turno or cambio_dot or cambio_franco or cambio_esp:
+                cambios.append({
+                    **f,
+                    "turno_anterior": act.get("turnos") or "",
+                    "dotacion_anterior": act.get("dotacion") or "",
+                    "franco_anterior": act.get("franco") or "",
+                    "cambio_turno": cambio_turno,
+                    "cambio_dotacion": cambio_dot,
+                })
+            else:
+                sin_cambios += 1
+
+        return {
+            "total_excel": len(filas_xlsx),
+            "cambios": cambios,
+            "altas": altas,
+            "sin_cambios": sin_cambios,
+        }
+
+    def aplicar_remocion_desde_excel(
+        self,
+        file_path: str,
+        nombre: str,
+        fecha_vigencia: str,
+        observaciones: str = "",
+        registrar_todos: bool = False,
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Aplica una remoción masiva desde un Excel BASE: actualiza `empleados`, cierra
+        los períodos previos en `empleado_historial_turnos` y abre los nuevos bajo la remoción."""
+        nombre = (nombre or "").strip()
+        if not nombre:
+            raise ValueError("Debe ingresar un nombre para la remoción.")
+        f_vig = parsear_fecha(fecha_vigencia, "Fecha de vigencia", obligatorio=True).date()
+        f_vig_iso = f_vig.strftime("%Y-%m-%d")
+
+        filas_xlsx = self._leer_filas_excel_base(file_path)
+        if not filas_xlsx:
+            raise ValueError("El archivo Excel no contiene registros válidos de empleados.")
+
+        ahora = self.db.now()
+        win_u = windows_user or obtener_usuario_windows()
+
+        with self.db.write_transaction() as conn:
+            cur = conn.execute(
+                """INSERT INTO remociones
+                   (nombre, fecha_vigencia, observaciones, cantidad_cambios, usuario_id, usuario_windows,
+                    sync_status, created_at, updated_at)
+                   VALUES (?, ?, ?, 0, ?, ?, 'pending', ?, ?)""",
+                (nombre, f_vig_iso, (observaciones or "").strip(), user_id, win_u, ahora, ahora),
+            )
+            rem_id = int(cur.lastrowid)
+
+            cambios_aplicados = 0
+            altas_aplicadas = 0
+
+            for f in filas_xlsx:
+                leg = f["legajo"]
+                existente = conn.execute("SELECT * FROM empleados WHERE legajo = ?", (leg,)).fetchone()
+                if existente:
+                    ex_dict = dict(existente)
+                    cambio = any(
+                        str(ex_dict.get(k) or "").strip() != str(f.get(k) or "").strip()
+                        for k in ("dotacion", "turnos", "franco", "franco_horario", "especialidad")
+                    )
+                    conn.execute(
+                        """UPDATE empleados
+                           SET apellidos_nombres = ?, especialidad = ?, dotacion = ?, turnos = ?,
+                               franco = ?, franco_horario = ?, jornada_horas = ?, actualizado_en = ?, activo = 1,
+                               sync_status = 'pending'
+                           WHERE id = ?""",
+                        (
+                            f["apellidos_nombres"], f["especialidad"], f["dotacion"], f["turnos"],
+                            f["franco"], f["franco_horario"], f["jornada_horas"], ahora, ex_dict["id"],
+                        ),
+                    )
+                    if cambio or registrar_todos:
+                        obs_item = (
+                            f"Anterior: {ex_dict.get('turnos') or '-'} ({ex_dict.get('dotacion') or '-'})"
+                            if cambio else (observaciones or "Mismo turno en remoción")
+                        )
+                        self._registrar_cambio_historial_conn(
+                            conn,
+                            legajo=leg,
+                            dotacion=f["dotacion"],
+                            turnos=f["turnos"],
+                            franco=f["franco"],
+                            franco_horario=f["franco_horario"],
+                            especialidad=f["especialidad"],
+                            fecha_desde=f_vig_iso,
+                            remocion_id=rem_id,
+                            remocion_nombre=nombre,
+                            motivo="Remoción",
+                            observaciones=obs_item,
+                            user_id=user_id,
+                            windows_user=win_u,
+                            datos_anteriores=ex_dict,
+                        )
+                        cambios_aplicados += 1
+                else:
+                    conn.execute(
+                        """INSERT INTO empleados
+                           (legajo, apellidos_nombres, especialidad, dotacion, turnos, franco, franco_horario,
+                            jornada_horas, actualizado_en, activo, sync_status)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'pending')""",
+                        (
+                            leg, f["apellidos_nombres"], f["especialidad"], f["dotacion"], f["turnos"],
+                            f["franco"], f["franco_horario"], f["jornada_horas"], ahora,
+                        ),
+                    )
+                    self._registrar_cambio_historial_conn(
+                        conn,
+                        legajo=leg,
+                        dotacion=f["dotacion"],
+                        turnos=f["turnos"],
+                        franco=f["franco"],
+                        franco_horario=f["franco_horario"],
+                        especialidad=f["especialidad"],
+                        fecha_desde=f_vig_iso,
+                        remocion_id=rem_id,
+                        remocion_nombre=nombre,
+                        motivo="Remoción (Alta)",
+                        observaciones=observaciones,
+                        user_id=user_id,
+                        windows_user=win_u,
+                    )
+                    altas_aplicadas += 1
+
+            total_reg = cambios_aplicados + altas_aplicadas
+            conn.execute(
+                "UPDATE remociones SET cantidad_cambios = ?, updated_at = ? WHERE id = ?",
+                (total_reg, ahora, rem_id),
+            )
+            after_rem = dict(conn.execute("SELECT * FROM remociones WHERE id = ?", (rem_id,)).fetchone())
+            self._audit(conn, user_id, win_u, "crear", "remocion", rem_id, None, after_rem)
+            self._enqueue_sync(conn, "remociones", rem_id, "INSERT", after_rem)
+
+        return {
+            "remocion_id": rem_id,
+            "cambios": cambios_aplicados,
+            "altas": altas_aplicadas,
+            "total_registrados": total_reg,
+        }
+

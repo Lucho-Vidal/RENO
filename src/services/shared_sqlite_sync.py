@@ -54,6 +54,8 @@ TABLAS_SINCRONIZABLES: tuple[tuple[str, tuple[str, ...], str, bool], ...] = (
     ("ordenamiento_tramos", ("id",), "updated_at", True),
     ("via_sectores", ("codigo",), "updated_at", False),
     ("via_conocimientos", ("legajo", "sector_id", "sentido"), "updated_at", False),
+    ("remociones", ("id",), "updated_at", True),
+    ("empleado_historial_turnos", ("id",), "updated_at", True),
     ("auditoria", ("id",), "creado_en", True),
 )
 

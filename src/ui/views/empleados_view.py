@@ -95,6 +95,21 @@ class EmpleadosView(QWidget):
         self.btn_exportar.clicked.connect(self._exportar_excel)
         bar.addWidget(self.btn_exportar)
 
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.VLine)
+        sep2.setFrameShadow(QFrame.Sunken)
+        bar.addWidget(sep2)
+
+        self.btn_historial_turnos = QPushButton("📜 Historial de Turnos")
+        self.btn_historial_turnos.setObjectName("btnSecondary")
+        self.btn_historial_turnos.clicked.connect(self._abrir_historial_turnos)
+        bar.addWidget(self.btn_historial_turnos)
+
+        self.btn_remociones = QPushButton("🔄 Remociones")
+        self.btn_remociones.setObjectName("btnSecondary")
+        self.btn_remociones.clicked.connect(self._abrir_remociones)
+        bar.addWidget(self.btn_remociones)
+
         bar.addStretch()
 
         # Filtro de Dotación
@@ -335,3 +350,32 @@ class EmpleadosView(QWidget):
             QMessageBox.information(self, "Exportación", f"Base de empleados exportada exitosamente en:\n{path}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Fallo al exportar:\n{e}")
+
+    def _abrir_historial_turnos(self) -> None:
+        emp = self._obtener_seleccionado()
+        if not emp:
+            QMessageBox.information(self, "Historial de Turnos", "Seleccione un empleado en la tabla.")
+            return
+        from src.ui.views.dialogs.remociones_dialogs import HistorialTurnosEmpleadoDialog
+
+        dlg = HistorialTurnosEmpleadoDialog(
+            records_service=self.records_service,
+            excel_service=self.excel_service,
+            empleado=emp,
+            usuario_actual=self.usuario_actual,
+            parent=self,
+        )
+        dlg.exec()
+
+    def _abrir_remociones(self) -> None:
+        from src.ui.views.dialogs.remociones_dialogs import RemocionesDialog
+
+        dlg = RemocionesDialog(
+            records_service=self.records_service,
+            excel_service=self.excel_service,
+            usuario_actual=self.usuario_actual,
+            parent=self,
+        )
+        dlg.exec()
+        if dlg.hubo_cambios:
+            self.recargar()
