@@ -12,6 +12,7 @@ from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QCompleter,
     QDateEdit,
     QFileDialog,
     QFrame,
@@ -230,10 +231,11 @@ class CalendarioCicloDialog(BaseMaximizedDialog):
         anio: Optional[int] = None,
         usuario_actual: Optional[Dict[str, Any]] = None,
         tiene_permiso_fn=None,
+        empleados_lista: Optional[List[Dict[str, Any]]] = None,
         parent=None,
     ):
         super().__init__(parent)
-        self.empleado = empleado
+        self.empleado = dict(empleado)
         self.records_service = records_service
         self.pdf_service = pdf_service
         self.excel_service = excel_service
@@ -245,11 +247,64 @@ class CalendarioCicloDialog(BaseMaximizedDialog):
         self.anio = anio or hoy.year
         self._dias_datos: List[Dict[str, Any]] = []
 
-        self.setWindowTitle(f"Calendario Mensual de Ciclo - {self.empleado.get('apellidos_nombres')} (Leg. {self.empleado.get('legajo')})")
+        self._todos_empleados_ciclo: List[Dict[str, Any]] = self._cargar_catalogo_ciclo()
+        self._empleados_nav: List[Dict[str, Any]] = self._preparar_lista_navegacion(empleados_lista)
+        self._idx_actual: int = self._buscar_indice_por_legajo(self._empleados_nav, self.empleado.get("legajo"))
+
         self.resize(1100, 700)
 
         self._init_ui()
+        self._actualizar_cabecera_y_nav()
         self.cargar_mes()
+
+    def _cargar_catalogo_ciclo(self) -> List[Dict[str, Any]]:
+        try:
+            return list(self.records_service.listar_empleados_ciclo() or [])
+        except Exception as e:
+            logger.warning("No se pudo cargar catálogo completo de ciclo: %s", e)
+            return []
+
+    def _preparar_lista_navegacion(self, empleados_lista: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        base = list(empleados_lista) if empleados_lista else list(self._todos_empleados_ciclo)
+        vistos = set()
+        resultado: List[Dict[str, Any]] = []
+        for item in base:
+            leg = item.get("legajo")
+            if leg is None:
+                continue
+            try:
+                leg_int = int(leg)
+            except (TypeError, ValueError):
+                continue
+            if leg_int in vistos:
+                continue
+            vistos.add(leg_int)
+            resultado.append(dict(item))
+
+        try:
+            leg_actual = int(self.empleado.get("legajo"))
+        except (TypeError, ValueError):
+            leg_actual = None
+
+        if leg_actual is not None and leg_actual not in vistos:
+            resultado.insert(0, dict(self.empleado))
+        elif not resultado:
+            resultado.append(dict(self.empleado))
+        return resultado
+
+    @staticmethod
+    def _buscar_indice_por_legajo(lista: List[Dict[str, Any]], legajo: Any) -> int:
+        try:
+            objetivo = int(legajo)
+        except (TypeError, ValueError):
+            return 0
+        for idx, item in enumerate(lista):
+            try:
+                if int(item.get("legajo")) == objetivo:
+                    return idx
+            except (TypeError, ValueError):
+                continue
+        return 0
 
     def _can(self, perm: str) -> bool:
         if self.tiene_permiso_fn:
@@ -261,6 +316,74 @@ class CalendarioCicloDialog(BaseMaximizedDialog):
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
 
+        # 0. Barra de navegación de personal (Anterior / Siguiente / Legajo / Nombre)
+        nav_frame = QFrame()
+        nav_frame.setObjectName("filterBar")
+        nav_layout = QHBoxLayout(nav_frame)
+        nav_layout.setContentsMargins(8, 4, 8, 4)
+        nav_layout.setSpacing(8)
+
+        self.btn_prev_emp = QPushButton("◀ Anterior")
+        self.btn_prev_emp.setObjectName("btnSecondary")
+        self.btn_prev_emp.clicked.connect(lambda: self._navegar_empleado(-1))
+        nav_layout.addWidget(self.btn_prev_emp)
+
+        self.lbl_nav_pos = QLabel("1 / 1")
+        self.lbl_nav_pos.setStyleSheet("font-weight: 600; min-width: 55px;")
+        self.lbl_nav_pos.setAlignment(Qt.AlignCenter)
+        nav_layout.addWidget(self.lbl_nav_pos)
+
+        self.btn_next_emp = QPushButton("Siguiente ▶")
+        self.btn_next_emp.setObjectName("btnSecondary")
+        self.btn_next_emp.clicked.connect(lambda: self._navegar_empleado(1))
+        nav_layout.addWidget(self.btn_next_emp)
+
+        nav_layout.addSpacing(12)
+        nav_layout.addWidget(QLabel("Legajo:"))
+        self.txt_nav_legajo = QLineEdit()
+        self.txt_nav_legajo.setPlaceholderText("Nro legajo...")
+        self.txt_nav_legajo.setFixedWidth(105)
+        self.txt_nav_legajo.returnPressed.connect(self._ir_por_legajo)
+        nav_layout.addWidget(self.txt_nav_legajo)
+
+        self.btn_ir_legajo = QPushButton("Ir")
+        self.btn_ir_legajo.setObjectName("btnSecondary")
+        self.btn_ir_legajo.clicked.connect(self._ir_por_legajo)
+        nav_layout.addWidget(self.btn_ir_legajo)
+
+        nav_layout.addSpacing(12)
+        nav_layout.addWidget(QLabel("Buscar por nombre:"))
+        self.combo_nav_nombre = QComboBox()
+        self.combo_nav_nombre.setEditable(True)
+        self.combo_nav_nombre.setInsertPolicy(QComboBox.NoInsert)
+        self.combo_nav_nombre.setMinimumWidth(290)
+        self.combo_nav_nombre.lineEdit().setPlaceholderText("Escriba apellido o nombre...")
+        self.combo_nav_nombre.lineEdit().setClearButtonEnabled(True)
+
+        self._etiquetas_busqueda: List[str] = []
+        self._mapa_busqueda_emp: Dict[str, Dict[str, Any]] = {}
+        fuente_busqueda = self._todos_empleados_ciclo or self._empleados_nav
+        vistos_busq = set()
+        for emp_item in fuente_busqueda:
+            leg_v = emp_item.get("legajo")
+            if leg_v in vistos_busq:
+                continue
+            vistos_busq.add(leg_v)
+            etiqueta = f"{emp_item.get('apellidos_nombres', '')} (Leg. {leg_v})"
+            self._etiquetas_busqueda.append(etiqueta)
+            self._mapa_busqueda_emp[etiqueta] = dict(emp_item)
+            self.combo_nav_nombre.addItem(etiqueta, leg_v)
+
+        completer = QCompleter(self._etiquetas_busqueda, self)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        self.combo_nav_nombre.setCompleter(completer)
+        self.combo_nav_nombre.activated.connect(self._on_seleccionar_nombre)
+        self.combo_nav_nombre.lineEdit().returnPressed.connect(self._ir_por_nombre_texto)
+        nav_layout.addWidget(self.combo_nav_nombre, 1)
+
+        layout.addWidget(nav_frame)
+
         # 1. Cabecera con datos del agente y selector de Mes/Año
         header_frame = QFrame()
         header_frame.setObjectName("headerFrame")
@@ -269,18 +392,12 @@ class CalendarioCicloDialog(BaseMaximizedDialog):
         # Info del empleado
         v_info = QVBoxLayout()
         v_info.setSpacing(3)
-        lbl_nombre = QLabel(f"<b>{self.empleado.get('apellidos_nombres')}</b> (Legajo: {self.empleado.get('legajo')})")
-        lbl_nombre.setObjectName("lblHeaderTitle")
-        lbl_detalles = QLabel(
-            f"Dotación: <b>{self.empleado.get('dotacion')}</b> | "
-            f"Especialidad: <b>{self.empleado.get('especialidad')}</b> | "
-            f"Turno: <b>{self.empleado.get('turnos')}</b> | "
-            f"Franco CCT: <b>{self.empleado.get('franco')}</b> | "
-            f"Jornada: <b>{self.empleado.get('jornada_horas', 6)} hs</b>"
-        )
-        lbl_detalles.setObjectName("lblHeaderSubtitle")
-        v_info.addWidget(lbl_nombre)
-        v_info.addWidget(lbl_detalles)
+        self.lbl_nombre = QLabel("")
+        self.lbl_nombre.setObjectName("lblHeaderTitle")
+        self.lbl_detalles = QLabel("")
+        self.lbl_detalles.setObjectName("lblHeaderSubtitle")
+        v_info.addWidget(self.lbl_nombre)
+        v_info.addWidget(self.lbl_detalles)
         h_layout.addLayout(v_info)
 
         h_layout.addStretch()
@@ -386,6 +503,117 @@ class CalendarioCicloDialog(BaseMaximizedDialog):
         btn_close_layout.addStretch()
         btn_close_layout.addWidget(btn_close)
         layout.addLayout(btn_close_layout)
+
+    def _actualizar_cabecera_y_nav(self) -> None:
+        nombre = self.empleado.get("apellidos_nombres") or ""
+        leg = self.empleado.get("legajo")
+        self.setWindowTitle(f"Calendario Mensual de Ciclo - {nombre} (Leg. {leg})")
+        self.lbl_nombre.setText(f"<b>{nombre}</b> (Legajo: {leg})")
+        franco_hor = str(self.empleado.get("franco_horario") or "").strip()
+        franco_txt = f"{self.empleado.get('franco') or '-'}" + (f" ({franco_hor})" if franco_hor else "")
+        self.lbl_detalles.setText(
+            f"Dotación: <b>{self.empleado.get('dotacion') or '-'}</b> | "
+            f"Especialidad: <b>{self.empleado.get('especialidad') or '-'}</b> | "
+            f"Turno: <b>{self.empleado.get('turnos') or '-'}</b> | "
+            f"Franco CCT: <b>{franco_txt}</b> | "
+            f"Jornada: <b>{self.empleado.get('jornada_horas', 6)} hs</b>"
+        )
+
+        total = len(self._empleados_nav)
+        self.lbl_nav_pos.setText(f"{self._idx_actual + 1} / {total}" if total else "0 / 0")
+        self.btn_prev_emp.setEnabled(total > 1 and self._idx_actual > 0)
+        self.btn_next_emp.setEnabled(total > 1 and self._idx_actual < total - 1)
+
+        self.txt_nav_legajo.setText(str(leg) if leg is not None else "")
+
+        self.combo_nav_nombre.blockSignals(True)
+        etiqueta_actual = f"{nombre} (Leg. {leg})"
+        idx_combo = self.combo_nav_nombre.findText(etiqueta_actual)
+        if idx_combo >= 0:
+            self.combo_nav_nombre.setCurrentIndex(idx_combo)
+        else:
+            self.combo_nav_nombre.setEditText(etiqueta_actual)
+        self.combo_nav_nombre.blockSignals(False)
+
+    def _seleccionar_empleado(self, emp: Dict[str, Any]) -> None:
+        self.empleado = dict(emp)
+        leg = self.empleado.get("legajo")
+        encontrado = False
+        for i, item in enumerate(self._empleados_nav):
+            try:
+                if int(item.get("legajo")) == int(leg):
+                    self._idx_actual = i
+                    encontrado = True
+                    break
+            except (TypeError, ValueError):
+                continue
+        if not encontrado:
+            self._empleados_nav.append(dict(self.empleado))
+            self._idx_actual = len(self._empleados_nav) - 1
+
+        self._actualizar_cabecera_y_nav()
+        self.cargar_mes()
+
+    def _navegar_empleado(self, delta: int) -> None:
+        if not self._empleados_nav:
+            return
+        nuevo_idx = self._idx_actual + delta
+        if 0 <= nuevo_idx < len(self._empleados_nav):
+            self._idx_actual = nuevo_idx
+            self.empleado = dict(self._empleados_nav[nuevo_idx])
+            self._actualizar_cabecera_y_nav()
+            self.cargar_mes()
+
+    def _ir_por_legajo(self) -> None:
+        raw = self.txt_nav_legajo.text().strip()
+        if not raw:
+            return
+        try:
+            leg_buscado = int(raw)
+        except ValueError:
+            QMessageBox.warning(self, "Legajo inválido", "Ingrese un número de legajo válido.")
+            return
+
+        for lista in (self._empleados_nav, self._todos_empleados_ciclo):
+            for item in lista:
+                try:
+                    if int(item.get("legajo")) == leg_buscado:
+                        self._seleccionar_empleado(item)
+                        return
+                except (TypeError, ValueError):
+                    continue
+
+        QMessageBox.information(
+            self,
+            "No encontrado",
+            f"No se encontró personal de ciclo activo con legajo {leg_buscado}.",
+        )
+
+    def _on_seleccionar_nombre(self, index: int) -> None:
+        if index < 0:
+            return
+        etiqueta = self.combo_nav_nombre.itemText(index)
+        emp = self._mapa_busqueda_emp.get(etiqueta)
+        if emp:
+            self._seleccionar_empleado(emp)
+
+    def _ir_por_nombre_texto(self) -> None:
+        texto = self.combo_nav_nombre.currentText().strip()
+        if not texto:
+            return
+        if texto in self._mapa_busqueda_emp:
+            self._seleccionar_empleado(self._mapa_busqueda_emp[texto])
+            return
+        t_low = texto.lower()
+        for etiqueta, emp in self._mapa_busqueda_emp.items():
+            if t_low in etiqueta.lower():
+                self._seleccionar_empleado(emp)
+                return
+        QMessageBox.information(
+            self,
+            "No encontrado",
+            f"No se encontró personal de ciclo cuyo nombre coincida con '{texto}'.",
+        )
 
     def cargar_mes(self) -> None:
         leg = int(self.empleado["legajo"])

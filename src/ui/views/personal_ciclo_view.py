@@ -373,6 +373,17 @@ class PersonalCicloView(QWidget):
                 if abierto in self._calendarios_abiertos:
                     self._calendarios_abiertos.remove(abierto)
 
+        empleados_lista: List[Dict[str, Any]] = []
+        vistos_leg = set()
+        for proxy in (self.proxy_libres, self.proxy_ocupados):
+            src_m = proxy.sourceModel()
+            for r in range(proxy.rowCount()):
+                src_idx = proxy.mapToSource(proxy.index(r, 0))
+                fila_emp = src_m.get_row(src_idx.row()) if hasattr(src_m, "get_row") else None
+                if fila_emp and fila_emp.get("legajo") not in vistos_leg:
+                    vistos_leg.add(fila_emp.get("legajo"))
+                    empleados_lista.append(dict(fila_emp))
+
         dlg = CalendarioCicloDialog(
             empleado=emp,
             records_service=self.records_service,
@@ -382,6 +393,7 @@ class PersonalCicloView(QWidget):
             anio=qdate.year(),
             usuario_actual=self.usuario_actual,
             tiene_permiso_fn=self.tiene_permiso_fn,
+            empleados_lista=empleados_lista,
             parent=self,
         )
         dlg.setWindowModality(Qt.NonModal)
