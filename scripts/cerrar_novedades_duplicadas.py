@@ -118,39 +118,54 @@ def analizar_y_cerrar_novedades_duplicadas(
     if aplicar and acciones:
         ahora = db.now()
         with db.write_transaction() as conn:
+            nov_cols = {r[1] for r in conn.execute("PRAGMA table_info(novedades)").fetchall()}
+            tablas = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            tiene_sync_status = "sync_status" in nov_cols
+            tiene_updated_at = "updated_at" in nov_cols
+            tiene_auditoria = "auditoria" in tablas
+            tiene_outbox = "sync_outbox" in tablas
+
+            set_clauses = ["fecha_fin = ?", "observaciones = ?"]
+            if tiene_sync_status:
+                set_clauses.append("sync_status = 'pending'")
+            if tiene_updated_at:
+                set_clauses.append("updated_at = ?")
+            update_sql = f"UPDATE novedades SET {', '.join(set_clauses)} WHERE id = ?"
+
             for acc in acciones:
                 nid = acc["id"]
                 before = conn.execute("SELECT * FROM novedades WHERE id = ?", (nid,)).fetchone()
                 if not before:
                     continue
-                conn.execute(
-                    """UPDATE novedades
-                       SET fecha_fin = ?, observaciones = ?, sync_status = 'pending'
-                       WHERE id = ?""",
-                    (acc["fecha_fin_nueva"], acc["observaciones_nueva"], nid),
-                )
+                params: List[Any] = [acc["fecha_fin_nueva"], acc["observaciones_nueva"]]
+                if tiene_updated_at:
+                    params.append(ahora)
+                params.append(nid)
+                conn.execute(update_sql, params)
                 after = dict(conn.execute("SELECT * FROM novedades WHERE id = ?", (nid,)).fetchone())
-                conn.execute(
-                    """INSERT INTO auditoria
-                       (creado_en, usuario_id, usuario_windows, accion, entidad, entidad_id, datos_anteriores, datos_nuevos)
-                       VALUES (?, NULL, ?, 'modificar', 'novedad', ?, ?, ?)""",
-                    (
-                        ahora,
-                        windows_user,
-                        nid,
-                        json.dumps(dict(before), ensure_ascii=False),
-                        json.dumps(after, ensure_ascii=False),
-                    ),
-                )
-                conn.execute(
-                    """INSERT INTO sync_outbox (tabla, registro_pk, operacion, payload_json, creado_en)
-                       VALUES ('novedades', ?, 'UPDATE', ?, ?)
-                       ON CONFLICT(tabla, registro_pk) DO UPDATE SET
-                           operacion = excluded.operacion,
-                           payload_json = excluded.payload_json,
-                           creado_en = excluded.creado_en""",
-                    (str(nid), json.dumps(after, ensure_ascii=False), ahora),
-                )
+                if tiene_auditoria:
+                    conn.execute(
+                        """INSERT INTO auditoria
+                           (creado_en, usuario_id, usuario_windows, accion, entidad, entidad_id, datos_anteriores, datos_nuevos)
+                           VALUES (?, NULL, ?, 'modificar', 'novedad', ?, ?, ?)""",
+                        (
+                            ahora,
+                            windows_user,
+                            nid,
+                            json.dumps(dict(before), ensure_ascii=False),
+                            json.dumps(after, ensure_ascii=False),
+                        ),
+                    )
+                if tiene_outbox:
+                    conn.execute(
+                        """INSERT INTO sync_outbox (tabla, registro_pk, operacion, payload_json, creado_en)
+                           VALUES ('novedades', ?, 'UPDATE', ?, ?)
+                           ON CONFLICT(tabla, registro_pk) DO UPDATE SET
+                               operacion = excluded.operacion,
+                               payload_json = excluded.payload_json,
+                               creado_en = excluded.creado_en""",
+                        (str(nid), json.dumps(after, ensure_ascii=False), ahora),
+                    )
                 cerradas += 1
 
     return {
