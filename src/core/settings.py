@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 try:
     from PySide6.QtCore import QByteArray, QSettings
     from PySide6.QtWidgets import QHeaderView, QWidget
@@ -59,6 +61,15 @@ class AppSettings:
         if isinstance(val, str):
             return val.strip().lower() in ("true", "1", "yes", "si", "sí")
         return bool(val)
+
+    def get_int(self, clave: str, default: int = 0) -> int:
+        val = self._qs.value(clave, default)
+        if val is None or isinstance(val, bool):
+            return int(default)
+        try:
+            return int(str(val).strip())
+        except (TypeError, ValueError):
+            return int(default)
 
     def set_window_geometry(self, nombre_clave: str, geometry: QByteArray) -> None:
         self._qs.setValue(f"geom_{nombre_clave}", geometry)

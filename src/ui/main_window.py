@@ -593,25 +593,43 @@ class MainWindow(QMainWindow):
             return getattr(self.tab_novedades_cambios, "tab_cambios", None)
         return None
 
+    def _ejecutar_recarga_vistas(self) -> None:
+        self._actualizar_notificaciones_nuevos()
+        self.tab_dashboard.actualizar_dashboard(no_revisados_count=self._sin_revisar_count)
+
+        if hasattr(self, "tab_novedades_cambios"):
+            self.tab_novedades_cambios.recargar_datos()
+        if hasattr(self, "tab_turnos_sin_cubrir"):
+            self.tab_turnos_sin_cubrir.consultar()
+        if hasattr(self, "tab_empleados"):
+            self.tab_empleados.recargar()
+        if hasattr(self, "tab_ciclo"):
+            self.tab_ciclo.consultar()
+        if hasattr(self, "tab_administracion"):
+            self.tab_administracion.recargar_todo()
+
+        self._actualizar_badge_sync()
+
     def recargar_todo(self) -> None:
         """Refresca todas las vistas activas y recomputa notificaciones."""
         try:
-            self._actualizar_notificaciones_nuevos()
-            self.tab_dashboard.actualizar_dashboard(no_revisados_count=self._sin_revisar_count)
-
-            if hasattr(self, "tab_novedades_cambios"):
-                self.tab_novedades_cambios.recargar_datos()
-            if hasattr(self, "tab_turnos_sin_cubrir"):
-                self.tab_turnos_sin_cubrir.consultar()
-            if hasattr(self, "tab_empleados"):
-                self.tab_empleados.recargar()
-            if hasattr(self, "tab_ciclo"):
-                self.tab_ciclo.consultar()
-            if hasattr(self, "tab_administracion"):
-                self.tab_administracion.recargar_todo()
-
-            self._actualizar_badge_sync()
+            self._ejecutar_recarga_vistas()
         except Exception as e:
+            if "no such table" in str(e).lower():
+                logger.warning(
+                    "Esquema SQLite incompleto detectado durante la recarga (%s). "
+                    "Ejecutando migración automática de esquema...",
+                    e,
+                )
+                try:
+                    from src.data.migrations import init_database_schema
+
+                    init_database_schema(self.db)
+                    self._ejecutar_recarga_vistas()
+                    return
+                except Exception as retry_err:
+                    logger.error(f"Error en recarga periódica tras migrar esquema: {retry_err}")
+                    return
             logger.error(f"Error en recarga periódica: {e}")
 
     def _on_registro_modificado(self) -> None:

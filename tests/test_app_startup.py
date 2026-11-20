@@ -77,6 +77,8 @@ def test_app_startup_and_main_window_instantiation(tmp_path: Path):
     # Verificar AppSettings
     settings = AppSettings()
     assert isinstance(settings.get_bool("notificaciones_activo", True), bool)
+    assert isinstance(settings.get_int("toast_duracion", 6), int)
+    assert settings.get_int("_clave_inexistente_test", 12) == 12
 
     # Instanciar MainWindow completa
     win = MainWindow(

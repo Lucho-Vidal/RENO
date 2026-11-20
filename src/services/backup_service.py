@@ -143,6 +143,11 @@ class BackupService:
         finally:
             destino.close()
             origen.close()
+
+        # Asegurar esquema completo v2 (por si el backup proviene de una versión anterior)
+        from src.data.migrations import init_database_schema
+
+        init_database_schema(self.db)
         logger.info(f"Base de datos restaurada exitosamente desde {backup_filename}.")
 
     def eliminar_backup(self, backup_filename: str) -> None:
