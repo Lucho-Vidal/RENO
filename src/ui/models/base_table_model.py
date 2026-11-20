@@ -130,3 +130,14 @@ class BaseTableModel(QAbstractTableModel):
 
     def get_all_data(self) -> List[Dict[str, Any]]:
         return list(self._data)
+
+    def move_row(self, from_row: int, to_row: int) -> bool:
+        """Mueve una fila de una posición a otra dentro del modelo."""
+        n = len(self._data)
+        if not (0 <= from_row < n) or not (0 <= to_row < n) or from_row == to_row:
+            return False
+        self.beginResetModel()
+        item = self._data.pop(from_row)
+        self._data.insert(to_row, item)
+        self.endResetModel()
+        return True

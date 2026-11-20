@@ -75,9 +75,10 @@ def _clave_orden_franco(emp: Dict[str, Any]) -> tuple:
 
 
 class DragDropCicloTableView(QTableView):
-    """Tabla con soporte Drag & Drop bidireccional para asignación y liberación de agentes de ciclo."""
+    """Tabla con soporte Drag & Drop bidireccional y reordenamiento interno para agentes de ciclo."""
 
     item_soltado = Signal(dict)
+    fila_reordenada = Signal(int, int)
 
     def __init__(self, rol: str, parent=None):
         super().__init__(parent)
@@ -110,9 +111,11 @@ class DragDropCicloTableView(QTableView):
         if hasattr(model, "mapToSource") and hasattr(model, "sourceModel"):
             src_idx = model.mapToSource(indexes[0])
             src_model = model.sourceModel()
-            row_data = src_model.get_row(src_idx.row()) if hasattr(src_model, "get_row") else None
+            src_row = src_idx.row()
+            row_data = src_model.get_row(src_row) if hasattr(src_model, "get_row") else None
         elif hasattr(model, "get_row"):
-            row_data = model.get_row(indexes[0].row())
+            src_row = indexes[0].row()
+            row_data = model.get_row(src_row)
         else:
             return
         if not row_data:
@@ -120,21 +123,18 @@ class DragDropCicloTableView(QTableView):
 
         drag = QDrag(self)
         mime = QMimeData()
-        payload = json.dumps({"origen_rol": self.rol, "datos": row_data}).encode("utf-8")
+        payload = json.dumps(
+            {"origen_rol": self.rol, "origen_fila": src_row, "datos": row_data}
+        ).encode("utf-8")
         mime.setData("application/x-ciclo-row", QByteArray(payload))
         drag.setMimeData(mime)
         drag.exec(Qt.MoveAction)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasFormat("application/x-ciclo-row"):
-            try:
-                data_dict = json.loads(bytes(event.mimeData().data("application/x-ciclo-row")).decode("utf-8"))
-                if data_dict.get("origen_rol") != self.rol:
-                    event.acceptProposedAction()
-                    return
-            except Exception:
-                pass
-        event.ignore()
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
     def dragMoveEvent(self, event):
         if event.mimeData().hasFormat("application/x-ciclo-row"):
@@ -146,10 +146,36 @@ class DragDropCicloTableView(QTableView):
         if event.mimeData().hasFormat("application/x-ciclo-row"):
             try:
                 data_dict = json.loads(bytes(event.mimeData().data("application/x-ciclo-row")).decode("utf-8"))
-                if data_dict.get("origen_rol") != self.rol:
+                origen_rol = data_dict.get("origen_rol")
+                if origen_rol != self.rol:
                     event.acceptProposedAction()
                     self.item_soltado.emit(data_dict.get("datos", {}))
                     return
+
+                origen_fila = data_dict.get("origen_fila")
+                if origen_fila is None:
+                    event.ignore()
+                    return
+
+                pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                drop_idx = self.indexAt(pos)
+                model = self.model()
+                if hasattr(model, "mapToSource") and hasattr(model, "sourceModel"):
+                    src_model = model.sourceModel()
+                    if drop_idx.isValid():
+                        destino_fila = model.mapToSource(drop_idx).row()
+                    else:
+                        destino_fila = max(0, src_model.rowCount() - 1)
+                else:
+                    if drop_idx.isValid():
+                        destino_fila = drop_idx.row()
+                    else:
+                        destino_fila = max(0, model.rowCount() - 1) if model else 0
+
+                event.acceptProposedAction()
+                if int(origen_fila) != int(destino_fila):
+                    self.fila_reordenada.emit(int(origen_fila), int(destino_fila))
+                return
             except Exception as e:
                 logger.error("Error en dropEvent ciclo: %s", e)
         event.ignore()
@@ -174,6 +200,8 @@ class PersonalCicloView(QWidget):
         self.usuario_actual = usuario_actual or {}
         self.tiene_permiso_fn = tiene_permiso_fn
         self._calendarios_abiertos: List[CalendarioCicloDialog] = []
+        self._orden_manual_libres: List[int] = []
+        self._orden_manual_ocupados: List[int] = []
 
         self._init_ui()
         self.consultar()
@@ -266,6 +294,7 @@ class PersonalCicloView(QWidget):
         self.table_libres.setColumnWidth(6, 130)  # HORARIO FRANCO
         self.table_libres.doubleClicked.connect(lambda idx: self._on_double_click(self.proxy_libres, idx))
         self.table_libres.item_soltado.connect(self._on_soltado_en_libres)
+        self.table_libres.fila_reordenada.connect(self._on_reordenar_libres)
         lay_libres.addWidget(self.table_libres)
         splitter.addWidget(grp_libres)
 
@@ -312,6 +341,7 @@ class PersonalCicloView(QWidget):
         self.table_ocupados.setColumnWidth(8, 95)   # HASTA
         self.table_ocupados.doubleClicked.connect(lambda idx: self._on_double_click(self.proxy_ocupados, idx))
         self.table_ocupados.item_soltado.connect(self._on_soltado_en_ocupados)
+        self.table_ocupados.fila_reordenada.connect(self._on_reordenar_ocupados)
         lay_ocupados.addWidget(self.table_ocupados)
         splitter.addWidget(grp_ocupados)
 
@@ -320,9 +350,57 @@ class PersonalCicloView(QWidget):
         layout.addWidget(splitter)
 
         # 3. Pie con instrucciones
-        lbl_hint = QLabel("💡 Arrastre y suelte (Drag & Drop) entre ambas tablas para asignar o liberar relevos. Doble clic para abrir el Calendario Mensual.")
+        lbl_hint = QLabel("💡 Arrastre y suelte (Drag & Drop) entre tablas para asignar/liberar relevos o dentro de la misma tabla para reordenar. Doble clic para abrir el Calendario Mensual.")
         lbl_hint.setStyleSheet("color: #6B7280; font-size: 8.5pt;")
         layout.addWidget(lbl_hint)
+
+    @staticmethod
+    def _aplicar_orden_manual(filas: List[Dict[str, Any]], orden_legajos: List[int]) -> List[Dict[str, Any]]:
+        if not orden_legajos:
+            return filas
+        pos = {leg: idx for idx, leg in enumerate(orden_legajos)}
+        en_orden = []
+        nuevos = []
+        for f in filas:
+            try:
+                leg = int(f.get("legajo"))
+            except (TypeError, ValueError):
+                leg = None
+            if leg is not None and leg in pos:
+                en_orden.append((pos[leg], f))
+            else:
+                nuevos.append(f)
+        en_orden.sort(key=lambda pair: pair[0])
+        return [f for _, f in en_orden] + nuevos
+
+    def _on_reordenar_tabla(
+        self,
+        table: DragDropCicloTableView,
+        proxy: MultiFilterProxyModel,
+        model: BaseTableModel,
+        from_row: int,
+        to_row: int,
+    ) -> List[int]:
+        if model.move_row(from_row, to_row):
+            src_idx = model.index(to_row, 0)
+            proxy_idx = proxy.mapFromSource(src_idx)
+            if proxy_idx.isValid():
+                table.selectRow(proxy_idx.row())
+        return [
+            int(r["legajo"])
+            for r in model.get_all_data()
+            if r.get("legajo") is not None
+        ]
+
+    def _on_reordenar_libres(self, from_row: int, to_row: int) -> None:
+        self._orden_manual_libres = self._on_reordenar_tabla(
+            self.table_libres, self.proxy_libres, self.model_libres, from_row, to_row
+        )
+
+    def _on_reordenar_ocupados(self, from_row: int, to_row: int) -> None:
+        self._orden_manual_ocupados = self._on_reordenar_tabla(
+            self.table_ocupados, self.proxy_ocupados, self.model_ocupados, from_row, to_row
+        )
 
     def _on_search_changed(self, text: str) -> None:
         self.proxy_libres.set_global_search(text)
@@ -336,6 +414,7 @@ class PersonalCicloView(QWidget):
         try:
             res = self.records_service.obtener_estado_personal_ciclo(f_str, dotacion=dot, especialidad=esp)
             libres_ordenados = sorted(res.get("libres", []), key=_clave_orden_franco)
+            libres_ordenados = self._aplicar_orden_manual(libres_ordenados, self._orden_manual_libres)
             self.model_libres.set_data(libres_ordenados)
 
             filas_ocupados = list(res.get("ocupados", []))
@@ -350,6 +429,7 @@ class PersonalCicloView(QWidget):
                 item_nov["fecha_fin_relevo"] = emp_nov.get("novedad_fecha_fin") or "Sin fecha fin"
                 filas_ocupados.append(item_nov)
 
+            filas_ocupados = self._aplicar_orden_manual(filas_ocupados, self._orden_manual_ocupados)
             self.model_ocupados.set_data(filas_ocupados)
         except Exception as e:
             logger.error(f"Error al consultar personal de ciclo: {e}")
