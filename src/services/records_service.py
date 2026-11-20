@@ -5195,4 +5195,517 @@ class RecordsService:
                 resultados.append(d_item)
             return resultados
 
+    # =========================================================================
+    # CONOCIMIENTO DE VÍA POR SECTOR (PERSONAL DE CONDUCCIÓN)
+    # =========================================================================
 
+    def listar_sectores_via(self, incluir_inactivos: bool = False) -> List[Dict[str, Any]]:
+        """Devuelve el catálogo de sectores de vía ordenado por `orden` y `codigo`."""
+        with self.db.read_connection() as conn:
+            where = "" if incluir_inactivos else "WHERE activo = 1"
+            rows = conn.execute(
+                f"""SELECT id, codigo, origen_sigla, destino_sigla, descripcion, orden, activo
+                    FROM via_sectores
+                    {where}
+                    ORDER BY orden ASC, id ASC"""
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def guardar_sector_via(
+        self,
+        data: Dict[str, Any],
+        sector_id: Optional[int] = None,
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> int:
+        """Crea o edita un sector de vía en el catálogo editable."""
+        codigo = str(data.get("codigo") or "").strip()
+        origen_sigla = str(data.get("origen_sigla") or "").strip().upper()
+        destino_sigla = str(data.get("destino_sigla") or "").strip().upper()
+        descripcion = str(data.get("descripcion") or "").strip()
+        try:
+            orden = int(data.get("orden") or 0)
+        except (TypeError, ValueError):
+            orden = 0
+        activo = 1 if data.get("activo", 1) else 0
+
+        if not codigo:
+            raise ValueError("El código del sector es obligatorio (ej. PC-TY).")
+        if not origen_sigla or not destino_sigla:
+            partes = [p.strip().upper() for p in codigo.split("-") if p.strip()]
+            if len(partes) == 2:
+                origen_sigla = origen_sigla or partes[0]
+                destino_sigla = destino_sigla or partes[1]
+        if not origen_sigla or not destino_sigla:
+            raise ValueError("Debe indicar sigla de origen y destino del sector.")
+
+        ahora = self.db.now()
+        win_u = windows_user or obtener_usuario_windows()
+
+        with self.db.write_transaction() as conn:
+            if sector_id is None:
+                if orden <= 0:
+                    max_ord = conn.execute("SELECT COALESCE(MAX(orden), 0) FROM via_sectores;").fetchone()[0]
+                    orden = int(max_ord) + 1
+                cur = conn.execute(
+                    """INSERT INTO via_sectores
+                       (codigo, origen_sigla, destino_sigla, descripcion, orden, activo, sync_status, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+                    (codigo, origen_sigla, destino_sigla, descripcion, orden, activo, ahora, ahora),
+                )
+                new_id = int(cur.lastrowid)
+                after = dict(conn.execute("SELECT * FROM via_sectores WHERE id = ?", (new_id,)).fetchone())
+                self._audit(conn, user_id, win_u, "crear", "via_sector", new_id, None, after)
+                self._enqueue_sync(conn, "via_sectores", codigo, "UPSERT", after)
+                return new_id
+
+            before_row = conn.execute("SELECT * FROM via_sectores WHERE id = ?", (int(sector_id),)).fetchone()
+            if not before_row:
+                raise ValueError(f"No se encontró el sector #{sector_id}.")
+            before = dict(before_row)
+            conn.execute(
+                """UPDATE via_sectores
+                   SET codigo = ?, origen_sigla = ?, destino_sigla = ?, descripcion = ?,
+                       orden = ?, activo = ?, sync_status = 'pending', updated_at = ?
+                   WHERE id = ?""",
+                (codigo, origen_sigla, destino_sigla, descripcion, orden, activo, ahora, int(sector_id)),
+            )
+            after = dict(conn.execute("SELECT * FROM via_sectores WHERE id = ?", (int(sector_id),)).fetchone())
+            self._audit(conn, user_id, win_u, "modificar", "via_sector", int(sector_id), before, after)
+            self._enqueue_sync(conn, "via_sectores", codigo, "UPSERT", after)
+            return int(sector_id)
+
+    def toggle_sector_via(
+        self,
+        sector_id: int,
+        activo: bool,
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> None:
+        ahora = self.db.now()
+        win_u = windows_user or obtener_usuario_windows()
+        with self.db.write_transaction() as conn:
+            before_row = conn.execute("SELECT * FROM via_sectores WHERE id = ?", (int(sector_id),)).fetchone()
+            if not before_row:
+                return
+            before = dict(before_row)
+            conn.execute(
+                "UPDATE via_sectores SET activo = ?, sync_status = 'pending', updated_at = ? WHERE id = ?",
+                (1 if activo else 0, ahora, int(sector_id)),
+            )
+            after = dict(conn.execute("SELECT * FROM via_sectores WHERE id = ?", (int(sector_id),)).fetchone())
+            self._audit(conn, user_id, win_u, "modificar", "via_sector", int(sector_id), before, after)
+            self._enqueue_sync(conn, "via_sectores", after["codigo"], "UPSERT", after)
+
+    def listar_personal_conduccion(
+        self,
+        dotacion: Optional[str] = None,
+        especialidad: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Devuelve el padrón activo de personal de conducción (conductores y ayudantes)."""
+        from src.domain.conocimiento_via import es_personal_conduccion
+
+        with self.db.read_connection() as conn:
+            query = """
+                SELECT id, legajo, apellidos_nombres, especialidad, dotacion, turnos, franco
+                FROM empleados
+                WHERE activo = 1
+            """
+            params: List[Any] = []
+            if dotacion and dotacion != "Todas":
+                query += " AND LOWER(TRIM(dotacion)) = LOWER(TRIM(?))"
+                params.append(dotacion)
+            query += " ORDER BY dotacion ASC, apellidos_nombres ASC"
+            rows = [dict(r) for r in conn.execute(query, params).fetchall()]
+
+        conduccion = [r for r in rows if es_personal_conduccion(r.get("especialidad"))]
+        if especialidad and especialidad != "Todas":
+            conduccion = [r for r in conduccion if _coincide_especialidad(r.get("especialidad"), especialidad)]
+        return conduccion
+
+    def obtener_matriz_conocimiento_via(
+        self,
+        dotacion: Optional[str] = None,
+        especialidad: Optional[str] = None,
+        hoy: Optional[date] = None,
+    ) -> Dict[str, Any]:
+        """Construye la matriz de Conocimiento de Vía (personal de conducción x sectores activos).
+
+        Evalúa vigencia por convenio a 2 años con umbrales de 60 y 30 días para conductores;
+        para ayudantes suprime las alertas visuales y de conteo de vencimientos.
+        """
+        from src.domain.conocimiento_via import (
+            es_ayudante_conduccion,
+            evaluar_vigencia_conocimiento,
+        )
+
+        ref_hoy = hoy or date.today()
+        sectores = self.listar_sectores_via(incluir_inactivos=False)
+        empleados = self.listar_personal_conduccion(dotacion=dotacion, especialidad=especialidad)
+
+        with self.db.read_connection() as conn:
+            conoc_rows = conn.execute(
+                """SELECT id, legajo, sector_id, sentido, fecha_conocimiento,
+                          origen_registro, turno_referencia, observaciones
+                   FROM via_conocimientos"""
+            ).fetchall()
+
+        mapa_conoc: Dict[Tuple[int, int, str], Dict[str, Any]] = {}
+        for c in conoc_rows:
+            mapa_conoc[(int(c["legajo"]), int(c["sector_id"]), str(c["sentido"]).upper())] = dict(c)
+
+        filas: List[Dict[str, Any]] = []
+        total_vencidos = 0
+        total_alerta_30 = 0
+        total_alerta_60 = 0
+        total_vigentes = 0
+
+        for emp in empleados:
+            leg = int(emp["legajo"])
+            ayudante = es_ayudante_conduccion(emp.get("especialidad"))
+            celdas: Dict[int, Dict[str, Any]] = {}
+            tiene_vencido = False
+            tiene_alerta_30 = False
+            tiene_alerta_60 = False
+            tiene_vigente = False
+
+            for sec in sectores:
+                sid = int(sec["id"])
+                info_sentidos: Dict[str, Dict[str, Any]] = {}
+                for sentido in ("ASC", "DESC"):
+                    reg = mapa_conoc.get((leg, sid, sentido))
+                    ev = evaluar_vigencia_conocimiento(
+                        reg.get("fecha_conocimiento") if reg else None,
+                        hoy=ref_hoy,
+                        suprimir_alertas=ayudante,
+                    )
+                    ev["observaciones"] = (reg.get("observaciones") or "") if reg else ""
+                    ev["origen_registro"] = (reg.get("origen_registro") or "") if reg else ""
+                    ev["turno_referencia"] = (reg.get("turno_referencia") or "") if reg else ""
+                    info_sentidos[sentido] = ev
+
+                    est_alerta = ev["estado_alerta"]
+                    if not ayudante:
+                        if est_alerta == "VENCIDO":
+                            tiene_vencido = True
+                            total_vencidos += 1
+                        elif est_alerta == "POR_VENCER_30":
+                            tiene_alerta_30 = True
+                            total_alerta_30 += 1
+                        elif est_alerta == "POR_VENCER_60":
+                            tiene_alerta_60 = True
+                            total_alerta_60 += 1
+                        elif est_alerta == "VIGENTE":
+                            tiene_vigente = True
+                            total_vigentes += 1
+                    elif ev["fecha_iso"]:
+                        tiene_vigente = True
+
+                celdas[sid] = info_sentidos
+
+            fila = dict(emp)
+            fila["es_ayudante"] = ayudante
+            fila["celdas"] = celdas
+            fila["tiene_vencido"] = tiene_vencido
+            fila["tiene_alerta_30"] = tiene_alerta_30
+            fila["tiene_alerta_60"] = tiene_alerta_60
+            fila["tiene_vigente"] = tiene_vigente
+            filas.append(fila)
+
+        return {
+            "sectores": sectores,
+            "filas": filas,
+            "resumen": {
+                "personal": len(filas),
+                "vencidos": total_vencidos,
+                "alerta_30": total_alerta_30,
+                "alerta_60": total_alerta_60,
+                "vigentes": total_vigentes,
+            },
+        }
+
+    def guardar_conocimiento_via(
+        self,
+        legajo: int,
+        sector_id: int,
+        sentidos: Sequence[str],
+        fecha_conocimiento: Any,
+        origen_registro: str = "manual",
+        turno_referencia: str = "",
+        observaciones: str = "",
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> int:
+        """Inserta o actualiza la fecha de conocimiento de vía para un agente, sector y sentidos."""
+        from src.domain.conocimiento_via import normalizar_fecha_iso
+
+        fecha_iso = normalizar_fecha_iso(fecha_conocimiento)
+        if not fecha_iso:
+            raise ValueError("Debe ingresar una fecha de conocimiento válida (DD/MM/YYYY).")
+
+        sentidos_norm = []
+        for s in sentidos:
+            su = str(s or "").strip().upper()
+            if su in ("ASC", "DESC") and su not in sentidos_norm:
+                sentidos_norm.append(su)
+        if not sentidos_norm:
+            raise ValueError("Debe seleccionar al menos un sentido (Ascendente o Descendente).")
+
+        ahora = self.db.now()
+        win_u = windows_user or obtener_usuario_windows()
+        guardados = 0
+
+        with self.db.write_transaction() as conn:
+            for sentido in sentidos_norm:
+                before_row = conn.execute(
+                    "SELECT * FROM via_conocimientos WHERE legajo = ? AND sector_id = ? AND sentido = ?",
+                    (int(legajo), int(sector_id), sentido),
+                ).fetchone()
+                conn.execute(
+                    """INSERT INTO via_conocimientos
+                       (legajo, sector_id, sentido, fecha_conocimiento, origen_registro, turno_referencia,
+                        observaciones, usuario_id, usuario_windows, sync_status, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                       ON CONFLICT(legajo, sector_id, sentido) DO UPDATE SET
+                           fecha_conocimiento = excluded.fecha_conocimiento,
+                           origen_registro = excluded.origen_registro,
+                           turno_referencia = excluded.turno_referencia,
+                           observaciones = excluded.observaciones,
+                           usuario_id = excluded.usuario_id,
+                           usuario_windows = excluded.usuario_windows,
+                           sync_status = 'pending',
+                           updated_at = excluded.updated_at""",
+                    (
+                        int(legajo),
+                        int(sector_id),
+                        sentido,
+                        fecha_iso,
+                        (origen_registro or "manual").strip(),
+                        (turno_referencia or "").strip(),
+                        (observaciones or "").strip(),
+                        user_id,
+                        win_u,
+                        ahora,
+                        ahora,
+                    ),
+                )
+                after = dict(
+                    conn.execute(
+                        "SELECT * FROM via_conocimientos WHERE legajo = ? AND sector_id = ? AND sentido = ?",
+                        (int(legajo), int(sector_id), sentido),
+                    ).fetchone()
+                )
+                self._audit(
+                    conn,
+                    user_id,
+                    win_u,
+                    "modificar" if before_row else "crear",
+                    "via_conocimiento",
+                    after["id"],
+                    dict(before_row) if before_row else None,
+                    after,
+                )
+                pk_comp = f"{int(legajo)}|{int(sector_id)}|{sentido}"
+                self._enqueue_sync(conn, "via_conocimientos", pk_comp, "UPSERT", after)
+                guardados += 1
+
+        return guardados
+
+    def eliminar_conocimiento_via(
+        self,
+        legajo: int,
+        sector_id: int,
+        sentido: Optional[str] = None,
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> int:
+        """Elimina el registro de conocimiento de vía para un agente y sector (uno o ambos sentidos)."""
+        win_u = windows_user or obtener_usuario_windows()
+        sentidos = [str(sentido).upper()] if sentido else ["ASC", "DESC"]
+        eliminados = 0
+        with self.db.write_transaction() as conn:
+            for s in sentidos:
+                before_row = conn.execute(
+                    "SELECT * FROM via_conocimientos WHERE legajo = ? AND sector_id = ? AND sentido = ?",
+                    (int(legajo), int(sector_id), s),
+                ).fetchone()
+                if not before_row:
+                    continue
+                before = dict(before_row)
+                conn.execute("DELETE FROM via_conocimientos WHERE id = ?", (before["id"],))
+                self._audit(conn, user_id, win_u, "eliminar", "via_conocimiento", before["id"], before, None)
+                pk_comp = f"{int(legajo)}|{int(sector_id)}|{s}"
+                self._enqueue_sync(conn, "via_conocimientos", pk_comp, "DELETE", before)
+                eliminados += 1
+        return eliminados
+
+    def previsualizar_conocimientos_por_turno(
+        self,
+        legajo: int,
+        codigo_turno: Optional[str] = None,
+        regimen: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Analiza el turno asignado a un agente en `turnos_itinerario` / `turnos_vueltas`
+        y propone los sectores de vía y sentidos (ASC alejándose de PC, DESC hacia PC) recorridos.
+        """
+        from src.domain.conocimiento_via import resolver_sectores_recorrido
+
+        with self.db.read_connection() as conn:
+            emp_row = conn.execute(
+                "SELECT legajo, apellidos_nombres, especialidad, dotacion, turnos FROM empleados WHERE legajo = ?",
+                (int(legajo),),
+            ).fetchone()
+            if not emp_row:
+                raise ValueError(f"No se encontró el empleado con legajo {legajo}.")
+            emp = dict(emp_row)
+
+            turno_objetivo = str(codigo_turno or emp.get("turnos") or "").strip()
+            if not turno_objetivo:
+                raise ValueError("El agente no tiene un turno asignado y no se indicó un código de turno.")
+
+            # Buscar turnos coincidentes por codigo_turno o turno_base
+            params_t: List[Any] = [turno_objetivo, turno_objetivo]
+            sql_t = """
+                SELECT id, codigo_turno, regimen, turno_base, itinerario_vigente
+                FROM turnos_itinerario
+                WHERE activo = 1
+                  AND (UPPER(TRIM(codigo_turno)) = UPPER(TRIM(?)) OR UPPER(TRIM(turno_base)) = UPPER(TRIM(?)))
+            """
+            if regimen and regimen not in ("Todos", "TODOS"):
+                sql_t += " AND UPPER(TRIM(regimen)) = UPPER(TRIM(?))"
+                params_t.append(regimen)
+            sql_t += " ORDER BY itinerario_vigente DESC, id DESC"
+            turnos_rows = [dict(r) for r in conn.execute(sql_t, params_t).fetchall()]
+
+            if not turnos_rows and "." in turno_objetivo:
+                # Fallback: buscar por turno_base antes del punto (ej. 401.1 -> 401)
+                base_sin_sub = turno_objetivo.split(".")[0].strip()
+                turnos_rows = [
+                    dict(r)
+                    for r in conn.execute(
+                        """SELECT id, codigo_turno, regimen, turno_base, itinerario_vigente
+                           FROM turnos_itinerario
+                           WHERE activo = 1 AND UPPER(TRIM(turno_base)) = UPPER(TRIM(?))
+                           ORDER BY itinerario_vigente DESC, id DESC""",
+                        (base_sin_sub,),
+                    ).fetchall()
+                ]
+
+            if not turnos_rows:
+                return {
+                    "empleado": emp,
+                    "turno_buscado": turno_objetivo,
+                    "turnos_encontrados": [],
+                    "vueltas": [],
+                    "propuestas": [],
+                }
+
+            # Si hay coincidencias exactas por codigo_turno, priorizarlas
+            exactos = [
+                t for t in turnos_rows
+                if str(t["codigo_turno"]).strip().upper() == turno_objetivo.upper()
+            ]
+            seleccionados = exactos or turnos_rows
+            itin_max = seleccionados[0]["itinerario_vigente"]
+            seleccionados = [t for t in seleccionados if t["itinerario_vigente"] == itin_max]
+
+            ids_t = [int(t["id"]) for t in seleccionados]
+            ph = ",".join("?" for _ in ids_t)
+            vueltas = [
+                dict(v)
+                for v in conn.execute(
+                    f"""SELECT v.id, v.turno_id, t.codigo_turno, t.regimen, v.nro_vuelta,
+                               v.nro_tren, v.origen, v.hora_salida, v.destino, v.hora_llegada
+                        FROM turnos_vueltas v
+                        JOIN turnos_itinerario t ON t.id = v.turno_id
+                        WHERE v.turno_id IN ({ph})
+                        ORDER BY t.codigo_turno ASC, v.nro_vuelta ASC""",
+                    ids_t,
+                ).fetchall()
+            ]
+
+            # Cargar paradas intermedias de los trenes involucrados si existen en tren_paradas
+            trenes_unicos = sorted({str(v.get("nro_tren") or "").strip() for v in vueltas if str(v.get("nro_tren") or "").strip()})
+            paradas_por_tren: Dict[str, List[str]] = {}
+            if trenes_unicos:
+                ph_tr = ",".join("?" for _ in trenes_unicos)
+                for p in conn.execute(
+                    f"""SELECT nro_tren, estacion
+                        FROM tren_paradas
+                        WHERE nro_tren IN ({ph_tr})
+                        ORDER BY nro_tren ASC, orden_parada ASC""",
+                    trenes_unicos,
+                ).fetchall():
+                    paradas_por_tren.setdefault(str(p["nro_tren"]).strip(), []).append(str(p["estacion"]).strip())
+
+        sectores_activos = self.listar_sectores_via(incluir_inactivos=False)
+        catalogo = self._obtener_indice_estaciones()
+
+        propuestas_map: Dict[Tuple[int, str], Dict[str, Any]] = {}
+        for v in vueltas:
+            ori = str(v.get("origen") or "").strip()
+            des = str(v.get("destino") or "").strip()
+            if not ori or not des:
+                continue
+            nro_tren = str(v.get("nro_tren") or "").strip()
+            paradas = paradas_por_tren.get(nro_tren)
+            pasos = resolver_sectores_recorrido(ori, des, sectores_activos, paradas_intermedias=paradas, catalogo=catalogo)
+            detalle_tramo = f"Tren {nro_tren or '-'} ({ori} → {des})"
+            for paso in pasos:
+                sid = paso.get("sector_id")
+                if sid is None:
+                    continue
+                clave = (int(sid), paso["sentido"])
+                if clave not in propuestas_map:
+                    propuestas_map[clave] = {
+                        "sector_id": int(sid),
+                        "codigo": paso["codigo"],
+                        "sentido": paso["sentido"],
+                        "origenes_detalle": [detalle_tramo],
+                    }
+                elif detalle_tramo not in propuestas_map[clave]["origenes_detalle"]:
+                    propuestas_map[clave]["origenes_detalle"].append(detalle_tramo)
+
+        orden_sec = {int(s["id"]): idx for idx, s in enumerate(sectores_activos)}
+        propuestas = sorted(
+            propuestas_map.values(),
+            key=lambda p: (orden_sec.get(p["sector_id"], 9999), 0 if p["sentido"] == "ASC" else 1),
+        )
+        for p in propuestas:
+            p["detalle"] = "; ".join(p["origenes_detalle"][:4])
+
+        return {
+            "empleado": emp,
+            "turno_buscado": turno_objetivo,
+            "turnos_encontrados": seleccionados,
+            "vueltas": vueltas,
+            "propuestas": propuestas,
+        }
+
+    def aplicar_conocimientos_por_turno(
+        self,
+        legajo: int,
+        items: Sequence[Dict[str, Any]],
+        fecha_conocimiento: Any,
+        turno_referencia: str = "",
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> int:
+        """Persiste los sectores/sentidos confirmados desde el autocompletado por turno."""
+        total = 0
+        for item in items:
+            sid = int(item["sector_id"])
+            sentido = str(item["sentido"]).upper()
+            obs = str(item.get("observaciones") or item.get("detalle") or f"Autocompletado por turno {turno_referencia}").strip()
+            total += self.guardar_conocimiento_via(
+                legajo=int(legajo),
+                sector_id=sid,
+                sentidos=[sentido],
+                fecha_conocimiento=fecha_conocimiento,
+                origen_registro="turno",
+                turno_referencia=turno_referencia,
+                observaciones=obs,
+                user_id=user_id,
+                windows_user=windows_user,
+            )
+        return total

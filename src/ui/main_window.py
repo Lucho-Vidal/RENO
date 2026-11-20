@@ -55,6 +55,7 @@ from src.ui.dialogs.sincronizacion_config_dialog import SincronizacionConfigDial
 from src.ui.views.administracion_view import AdministracionView
 from src.ui.views.buscador_turnos_view import BuscadorTurnosView
 from src.ui.views.cambios_turno_view import CambiosTurnoView
+from src.ui.views.conocimiento_via_view import ConocimientoViaView
 from src.ui.views.dashboard_view import DashboardView
 from src.ui.views.empleados_view import EmpleadosView
 from src.ui.views.novedades_cambios_view import NovedadesCambiosView
@@ -182,6 +183,8 @@ class MainWindow(QMainWindow):
                 self.tab_buscador_turnos.actualizar_tema()
             if hasattr(self, "tab_turnos_sin_cubrir") and hasattr(self.tab_turnos_sin_cubrir, "table"):
                 self.tab_turnos_sin_cubrir.table.viewport().update()
+            if hasattr(self, "tab_conocimiento_via") and hasattr(self.tab_conocimiento_via, "table"):
+                self.tab_conocimiento_via.table.viewport().update()
             if hasattr(self, "tab_administracion") and hasattr(self.tab_administracion, "actualizar_tema"):
                 self.tab_administracion.actualizar_tema(tema_activo)
         except Exception as e:
@@ -423,6 +426,17 @@ class MainWindow(QMainWindow):
             )
             self.tabs.addTab(self.tab_ciclo, "⏱️ Personal de Ciclo")
 
+        # 6b. Conocimiento de Vía (Personal de Conducción)
+        if self._tiene_permiso("conocimiento_via.ver"):
+            self.tab_conocimiento_via = ConocimientoViaView(
+                self.records_service,
+                self.excel_service,
+                usuario_actual=self.usuario_actual,
+                tiene_permiso_fn=self._tiene_permiso,
+                parent=self,
+            )
+            self.tabs.addTab(self.tab_conocimiento_via, "🛤️ Conocimiento de Vía")
+
         # 7. Administración Integral por Pestañas
         tiene_admin = (
             self._tiene_permiso("usuarios.administrar")
@@ -605,6 +619,8 @@ class MainWindow(QMainWindow):
             self.tab_empleados.recargar()
         if hasattr(self, "tab_ciclo"):
             self.tab_ciclo.consultar()
+        if hasattr(self, "tab_conocimiento_via"):
+            self.tab_conocimiento_via.consultar()
         if hasattr(self, "tab_administracion"):
             self.tab_administracion.recargar_todo()
 

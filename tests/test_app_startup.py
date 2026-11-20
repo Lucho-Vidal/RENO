@@ -93,13 +93,14 @@ def test_app_startup_and_main_window_instantiation(tmp_path: Path):
         supabase_sync=None,
     )
 
-    assert win.tabs.count() == 7
+    assert win.tabs.count() == 8
     assert hasattr(win, "tab_dashboard")
     assert hasattr(win, "tab_buscador_turnos")
     assert hasattr(win, "tab_novedades_cambios")
     assert hasattr(win, "tab_turnos_sin_cubrir")
     assert hasattr(win, "tab_empleados")
     assert hasattr(win, "tab_ciclo")
+    assert hasattr(win, "tab_conocimiento_via")
     assert hasattr(win, "tab_administracion")
     assert win.tab_novedades is not None
     assert win.tab_cambios is not None

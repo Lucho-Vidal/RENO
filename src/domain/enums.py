@@ -62,6 +62,9 @@ PERMISOS_BASE: tuple[str, ...] = (
     "ordenamientos.exportar",
     "reemplazos.ver",
     "reemplazos.asignar",
+    "conocimiento_via.ver",
+    "conocimiento_via.editar",
+    "conocimiento_via.administrar",
     "empleados.administrar",
     "empleados.importar",
     "usuarios.administrar",
@@ -304,6 +307,32 @@ PERMISOS_METADATA: dict[str, dict[str, str]] = {
         "pestana": "⏱️ Personal de Ciclo",
         "subpestana": "Personal de Ciclo",
         "descripcion": "Permite asignar tramos de cobertura a personal de ciclo respetando descansos CCT y horas semanales.",
+    },
+
+    # 5b. Conocimiento de Vía (Personal de Conducción)
+    "conocimiento_via.ver": {
+        "codigo": "conocimiento_via.ver",
+        "accion": "Ver (Lectura)",
+        "titulo": "Consultar Conocimiento de Vía por Sector",
+        "pestana": "🛤️ Conocimiento de Vía",
+        "subpestana": "Matriz de Sectores",
+        "descripcion": "Permite visualizar la matriz de conocimiento de vía por sector (vía ascendente y descendente) y vencimientos del personal de conducción.",
+    },
+    "conocimiento_via.editar": {
+        "codigo": "conocimiento_via.editar",
+        "accion": "Editar",
+        "titulo": "Registrar y Actualizar Conocimiento de Vía",
+        "pestana": "🛤️ Conocimiento de Vía",
+        "subpestana": "Matriz de Sectores",
+        "descripcion": "Permite cargar fechas de conocimiento de vía por sector/sentido y ejecutar el autocompletado según el turno asignado.",
+    },
+    "conocimiento_via.administrar": {
+        "codigo": "conocimiento_via.administrar",
+        "accion": "Administrar",
+        "titulo": "Administrar Catálogo de Sectores de Vía",
+        "pestana": "🛤️ Conocimiento de Vía",
+        "subpestana": "Catálogo de Sectores",
+        "descripcion": "Permite crear, editar, reordenar y activar/desactivar los sectores de vía disponibles.",
     },
 
     # 6. Empleados (BASE)

@@ -1039,3 +1039,77 @@ class ExcelService:
 
         wb.save(file_path)
         return str(file_path)
+
+    def export_conocimiento_via(
+        self,
+        output_path: str,
+        sectores: List[Dict[str, Any]],
+        filas: List[Dict[str, Any]],
+    ) -> str:
+        """Exporta la matriz de Conocimiento de Vía (ASC / DESC) con colores de alerta a Excel."""
+        out_file = Path(output_path)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Conocimiento de Vía"
+
+        headers = ["LEGAJO", "APELLIDOS Y NOMBRES", "ESPECIALIDAD", "DOTACIÓN", "TURNO"]
+        for sec in sectores:
+            headers.append(f"{sec['codigo']} (ASC)")
+            headers.append(f"{sec['codigo']} (DESC)")
+        ws.append(headers)
+
+        header_fill = PatternFill(start_color="1F3A5F", end_color="1F3A5F", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF")
+        for col_idx in range(1, len(headers) + 1):
+            c = ws.cell(row=1, column=col_idx)
+            c.fill = header_fill
+            c.font = header_font
+
+        fill_vigente = PatternFill(start_color="E8F5E9", end_color="E8F5E9", fill_type="solid")
+        fill_60 = PatternFill(start_color="FFF9C4", end_color="FFF9C4", fill_type="solid")
+        fill_30 = PatternFill(start_color="FFE0B2", end_color="FFE0B2", fill_type="solid")
+        fill_vencido = PatternFill(start_color="FFEBEE", end_color="FFEBEE", fill_type="solid")
+
+        for fila in filas:
+            row_vals: List[Any] = [
+                fila.get("legajo", ""),
+                fila.get("apellidos_nombres", ""),
+                fila.get("especialidad", ""),
+                fila.get("dotacion", ""),
+                fila.get("turnos", ""),
+            ]
+            celdas = fila.get("celdas", {})
+            estados_fila: List[str] = []
+            for sec in sectores:
+                sid = int(sec["id"])
+                info_s = celdas.get(sid, {})
+                for sentido in ("ASC", "DESC"):
+                    ev = info_s.get(sentido, {})
+                    row_vals.append(ev.get("fecha_display") or "")
+                    estados_fila.append(ev.get("estado_alerta") or "SIN_REGISTRO")
+
+            ws.append(row_vals)
+            curr_row = ws.max_row
+            for offset, est in enumerate(estados_fila):
+                cell = ws.cell(row=curr_row, column=6 + offset)
+                if est == "VIGENTE":
+                    cell.fill = fill_vigente
+                elif est == "POR_VENCER_60":
+                    cell.fill = fill_60
+                elif est == "POR_VENCER_30":
+                    cell.fill = fill_30
+                elif est == "VENCIDO":
+                    cell.fill = fill_vencido
+
+        ws.freeze_panes = "F2"
+        if ws.max_row > 1:
+            ws.auto_filter.ref = ws.dimensions
+        for idx, h in enumerate(headers, start=1):
+            width = 26 if idx == 2 else (18 if idx == 3 else max(13, len(str(h)) + 2))
+            ws.column_dimensions[get_column_letter(idx)].width = width
+
+        wb.save(out_file)
+        return str(out_file)
+

@@ -381,6 +381,41 @@ def init_database_schema(db: DatabaseManager) -> None:
             CREATE INDEX IF NOT EXISTS idx_ordenamientos_estado ON ordenamientos(estado, activo);
             CREATE INDEX IF NOT EXISTS idx_ord_tramos_ord_id ON ordenamiento_tramos(ordenamiento_id);
             CREATE INDEX IF NOT EXISTS idx_ord_tramos_tren ON ordenamiento_tramos(nro_tren);
+
+            -- Catálogo editable de sectores de vía (Conocimiento de Vía - Personal de Conducción)
+            CREATE TABLE IF NOT EXISTS via_sectores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                codigo TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                origen_sigla TEXT NOT NULL DEFAULT '',
+                destino_sigla TEXT NOT NULL DEFAULT '',
+                descripcion TEXT NOT NULL DEFAULT '',
+                orden INTEGER NOT NULL DEFAULT 0,
+                activo INTEGER NOT NULL DEFAULT 1 CHECK (activo IN (0, 1)),
+                sync_status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+            );
+
+            -- Registro de fecha de conocimiento de vía por agente, sector y sentido (ASC / DESC)
+            CREATE TABLE IF NOT EXISTS via_conocimientos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                legajo INTEGER NOT NULL REFERENCES empleados(legajo) ON DELETE CASCADE,
+                sector_id INTEGER NOT NULL REFERENCES via_sectores(id) ON DELETE CASCADE,
+                sentido TEXT NOT NULL CHECK (sentido IN ('ASC', 'DESC')),
+                fecha_conocimiento TEXT NOT NULL,
+                origen_registro TEXT NOT NULL DEFAULT 'manual',
+                turno_referencia TEXT NOT NULL DEFAULT '',
+                observaciones TEXT NOT NULL DEFAULT '',
+                usuario_id INTEGER REFERENCES usuarios(id),
+                usuario_windows TEXT,
+                sync_status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+                UNIQUE(legajo, sector_id, sentido)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_via_conocimientos_legajo ON via_conocimientos(legajo);
+            CREATE INDEX IF NOT EXISTS idx_via_conocimientos_sector ON via_conocimientos(sector_id);
             """
         )
 
@@ -404,6 +439,8 @@ def init_database_schema(db: DatabaseManager) -> None:
             "tren_paradas",
             "ordenamientos",
             "ordenamiento_tramos",
+            "via_sectores",
+            "via_conocimientos",
         ]
         for t in tablas_sincronizables:
             cols = {row[1] for row in conn.execute(f"PRAGMA table_info({t});").fetchall()}
@@ -471,6 +508,28 @@ def init_database_schema(db: DatabaseManager) -> None:
                         ", ".join(st.get("aliases") or ()),
                     )
                     for st in ESTACIONES_BASE
+                ],
+            )
+
+        # Poblar catálogo base de sectores de vía (19 sectores Línea Roca) si está vacío
+        cnt_sec = conn.execute("SELECT COUNT(*) FROM via_sectores;").fetchone()[0]
+        if cnt_sec == 0:
+            from src.domain.conocimiento_via import SECTORES_VIA_BASE
+
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO via_sectores (codigo, origen_sigla, destino_sigla, descripcion, orden, activo)
+                VALUES (?, ?, ?, ?, ?, 1);
+                """,
+                [
+                    (
+                        sec["codigo"],
+                        sec["origen_sigla"],
+                        sec["destino_sigla"],
+                        sec.get("descripcion", ""),
+                        sec.get("orden", 0),
+                    )
+                    for sec in SECTORES_VIA_BASE
                 ],
             )
 
