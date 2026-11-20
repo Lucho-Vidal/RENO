@@ -7,6 +7,8 @@ y acceso al Calendario Mensual de Ciclo.
 
 from typing import Any, Dict, List, Optional
 import json
+import re
+import unicodedata
 
 from PySide6.QtCore import QByteArray, QDate, QMimeData, QPoint, Qt, Signal
 from PySide6.QtGui import QDrag
@@ -19,6 +21,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -34,10 +37,41 @@ from src.services.excel_service import ExcelService
 from src.services.pdf_service import PDFService
 from src.services.records_service import RecordsService
 from src.ui.models.base_table_model import BaseTableModel
+from src.ui.models.multi_filter_proxy import MultiFilterProxyModel
 from src.ui.views.dialogs.base_dialog import BaseDialog
 from src.ui.views.dialogs.calendario_ciclo_dialog import CalendarioCicloDialog
 
 logger = get_logger("PersonalCicloView")
+
+_ORDEN_DIAS_FRANCO = {
+    "lunes": 0,
+    "martes": 1,
+    "miercoles": 2,
+    "jueves": 3,
+    "viernes": 4,
+    "sabado": 5,
+    "domingo": 6,
+}
+
+
+def _clave_orden_franco(emp: Dict[str, Any]) -> tuple:
+    """Ordena personal de ciclo disponible por día de franco (Lun-Dom) y horario de franco."""
+    franco_raw = str(emp.get("franco") or "").strip()
+    nfkd = unicodedata.normalize("NFKD", franco_raw)
+    franco_norm = "".join(c for c in nfkd if not unicodedata.combining(c)).lower()
+    dia_idx = _ORDEN_DIAS_FRANCO.get(franco_norm, 99)
+
+    hor_raw = str(emp.get("franco_horario") or "").strip()
+    m = re.search(r"(\d{1,2})\s*[:.]\s*(\d{2})", hor_raw)
+    if m:
+        hor_key = (0, int(m.group(1)) * 60 + int(m.group(2)), hor_raw)
+    elif hor_raw:
+        hor_key = (1, 9999, hor_raw.lower())
+    else:
+        hor_key = (2, 9999, "")
+
+    nombre = str(emp.get("apellidos_nombres") or "").strip().lower()
+    return (dia_idx, hor_key, nombre)
 
 
 class DragDropCicloTableView(QTableView):
@@ -73,9 +107,15 @@ class DragDropCicloTableView(QTableView):
             return
 
         model = self.model()
-        if hasattr(model, "get_row"):
+        if hasattr(model, "mapToSource") and hasattr(model, "sourceModel"):
+            src_idx = model.mapToSource(indexes[0])
+            src_model = model.sourceModel()
+            row_data = src_model.get_row(src_idx.row()) if hasattr(src_model, "get_row") else None
+        elif hasattr(model, "get_row"):
             row_data = model.get_row(indexes[0].row())
         else:
+            return
+        if not row_data:
             return
 
         drag = QDrag(self)
@@ -183,6 +223,14 @@ class PersonalCicloView(QWidget):
         self.btn_consultar.clicked.connect(self.consultar)
         bar_layout.addWidget(self.btn_consultar)
 
+        bar_layout.addWidget(QLabel("Buscar:"))
+        self.txt_search = QLineEdit()
+        self.txt_search.setPlaceholderText("Legajo, nombre, franco...")
+        self.txt_search.setClearButtonEnabled(True)
+        self.txt_search.setFixedWidth(200)
+        self.txt_search.textChanged.connect(self._on_search_changed)
+        bar_layout.addWidget(self.txt_search)
+
         bar_layout.addStretch()
 
         self.btn_ver_calendario = QPushButton("📅 Ver Calendario Mensual")
@@ -202,8 +250,10 @@ class PersonalCicloView(QWidget):
         keys_libres = ["legajo", "apellidos_nombres", "especialidad", "dotacion", "turnos", "franco", "franco_horario"]
 
         self.model_libres = BaseTableModel(headers_libres, keys_libres, parent=self)
+        self.proxy_libres = MultiFilterProxyModel(self)
+        self.proxy_libres.setSourceModel(self.model_libres)
         self.table_libres = DragDropCicloTableView("LIBRES", parent=self)
-        self.table_libres.setModel(self.model_libres)
+        self.table_libres.setModel(self.proxy_libres)
         self.table_libres.setSelectionBehavior(QTableView.SelectRows)
         self.table_libres.setSelectionMode(QTableView.SingleSelection)
         self.table_libres.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
@@ -214,7 +264,7 @@ class PersonalCicloView(QWidget):
         self.table_libres.setColumnWidth(4, 120)  # TURNO HABITUAL
         self.table_libres.setColumnWidth(5, 90)   # FRANCO
         self.table_libres.setColumnWidth(6, 130)  # HORARIO FRANCO
-        self.table_libres.doubleClicked.connect(lambda idx: self._on_double_click(self.model_libres, idx))
+        self.table_libres.doubleClicked.connect(lambda idx: self._on_double_click(self.proxy_libres, idx))
         self.table_libres.item_soltado.connect(self._on_soltado_en_libres)
         lay_libres.addWidget(self.table_libres)
         splitter.addWidget(grp_libres)
@@ -232,8 +282,10 @@ class PersonalCicloView(QWidget):
         ]
 
         self.model_ocupados = BaseTableModel(headers_ocupados, keys_ocupados, parent=self)
+        self.proxy_ocupados = MultiFilterProxyModel(self)
+        self.proxy_ocupados.setSourceModel(self.model_ocupados)
         self.table_ocupados = DragDropCicloTableView("OCUPADOS", parent=self)
-        self.table_ocupados.setModel(self.model_ocupados)
+        self.table_ocupados.setModel(self.proxy_ocupados)
         self.table_ocupados.setSelectionBehavior(QTableView.SelectRows)
         self.table_ocupados.setSelectionMode(QTableView.SingleSelection)
         self.table_ocupados.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
@@ -246,7 +298,7 @@ class PersonalCicloView(QWidget):
         self.table_ocupados.setColumnWidth(6, 160)  # MOTIVO / NOVEDAD
         self.table_ocupados.setColumnWidth(7, 95)   # DESDE
         self.table_ocupados.setColumnWidth(8, 95)   # HASTA
-        self.table_ocupados.doubleClicked.connect(lambda idx: self._on_double_click(self.model_ocupados, idx))
+        self.table_ocupados.doubleClicked.connect(lambda idx: self._on_double_click(self.proxy_ocupados, idx))
         self.table_ocupados.item_soltado.connect(self._on_soltado_en_ocupados)
         lay_ocupados.addWidget(self.table_ocupados)
         splitter.addWidget(grp_ocupados)
@@ -260,6 +312,10 @@ class PersonalCicloView(QWidget):
         lbl_hint.setStyleSheet("color: #6B7280; font-size: 8.5pt;")
         layout.addWidget(lbl_hint)
 
+    def _on_search_changed(self, text: str) -> None:
+        self.proxy_libres.set_global_search(text)
+        self.proxy_ocupados.set_global_search(text)
+
     def consultar(self) -> None:
         f_str = self.date_picker.date().toString("dd/MM/yyyy")
         dot = self.combo_dotacion.currentText()
@@ -267,27 +323,37 @@ class PersonalCicloView(QWidget):
 
         try:
             res = self.records_service.obtener_estado_personal_ciclo(f_str, dotacion=dot, especialidad=esp)
-            self.model_libres.set_data(res.get("libres", []))
+            libres_ordenados = sorted(res.get("libres", []), key=_clave_orden_franco)
+            self.model_libres.set_data(libres_ordenados)
             self.model_ocupados.set_data(res.get("ocupados", []))
         except Exception as e:
             logger.error(f"Error al consultar personal de ciclo: {e}")
 
-    def _on_double_click(self, model: BaseTableModel, index) -> None:
-        emp = model.get_row(index.row())
+    def _obtener_fila_desde_proxy(self, proxy: MultiFilterProxyModel, proxy_index) -> Optional[Dict[str, Any]]:
+        if not proxy_index or not proxy_index.isValid():
+            return None
+        src_idx = proxy.mapToSource(proxy_index)
+        src_model = proxy.sourceModel()
+        if hasattr(src_model, "get_row"):
+            return src_model.get_row(src_idx.row())
+        return None
+
+    def _on_double_click(self, proxy: MultiFilterProxyModel, index) -> None:
+        emp = self._obtener_fila_desde_proxy(proxy, index)
         if emp:
             self._abrir_calendario(emp)
 
     def _abrir_calendario_seleccionado(self) -> None:
         sel_l = self.table_libres.selectionModel().selectedRows()
         if sel_l:
-            emp = self.model_libres.get_row(sel_l[0].row())
+            emp = self._obtener_fila_desde_proxy(self.proxy_libres, sel_l[0])
             if emp:
                 self._abrir_calendario(emp)
                 return
 
         sel_o = self.table_ocupados.selectionModel().selectedRows()
         if sel_o:
-            emp = self.model_ocupados.get_row(sel_o[0].row())
+            emp = self._obtener_fila_desde_proxy(self.proxy_ocupados, sel_o[0])
             if emp:
                 self._abrir_calendario(emp)
                 return
