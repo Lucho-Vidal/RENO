@@ -5,6 +5,7 @@ from datetime import date, datetime
 
 from PySide6.QtCore import QDate, Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDateEdit,
     QFileDialog,
@@ -33,6 +34,21 @@ from src.ui.views.dialogs.base_dialog import BaseDialog
 from src.ui.views.dialogs.novedad_dialog import NovedadDialog
 
 logger = get_logger("NovedadesView")
+
+
+def es_novedad_vigente(fecha_fin: Any, hoy: Optional[date] = None) -> bool:
+    """Devuelve True si la novedad está vigente hoy (abierta o con fecha_fin >= hoy)."""
+    raw = str(fecha_fin or "").strip()
+    if not raw or raw in ("-", "None", "null", "NULL"):
+        return True
+    try:
+        dt_fin = parsear_fecha(raw, "Fecha de Fin", obligatorio=False)
+    except Exception:
+        return True
+    if not dt_fin:
+        return True
+    ref = hoy or date.today()
+    return dt_fin.date() >= ref
 
 
 class TurnosSinCubrirDialog(BaseDialog):
@@ -243,6 +259,14 @@ class NovedadesView(QWidget):
         self.chk_filtrar_fecha.currentIndexChanged.connect(self._on_filter_changed)
         filter_layout.addWidget(self.chk_filtrar_fecha)
 
+        self.chk_ocultar_no_vigentes = QCheckBox("Ocultar no vigentes")
+        self.chk_ocultar_no_vigentes.setChecked(True)
+        self.chk_ocultar_no_vigentes.setToolTip(
+            "Oculta las novedades cuya fecha de fin es anterior al día de hoy."
+        )
+        self.chk_ocultar_no_vigentes.toggled.connect(self._on_filter_changed)
+        filter_layout.addWidget(self.chk_ocultar_no_vigentes)
+
         self.btn_limpiar = QPushButton("Limpiar")
         self.btn_limpiar.setObjectName("btnSecondary")
         self.btn_limpiar.clicked.connect(self._limpiar_filtros)
@@ -296,6 +320,13 @@ class NovedadesView(QWidget):
         self.lbl_conteo.setStyleSheet("color: #6B7280; font-size: 8.5pt;")
         layout.addWidget(self.lbl_conteo)
 
+        self._on_filter_changed()
+
+    def _filtro_vigente_fila(self, source_model, source_row: int, source_parent) -> bool:
+        idx = source_model.index(source_row, 10, source_parent)  # Columna 10 = HASTA (fecha_fin)
+        raw_fin = source_model.data(idx, Qt.DisplayRole)
+        return es_novedad_vigente(raw_fin)
+
     def recargar_datos(self) -> None:
         novedades = self.records_service.listar_novedades()
         coberturas = self.records_service.obtener_mapa_cobertura_novedades()
@@ -312,7 +343,7 @@ class NovedadesView(QWidget):
 
         self.table_model.set_data(novedades)
         self._actualizar_combos_filtros()
-        self._actualizar_conteo()
+        self._on_filter_changed()
 
     def _actualizar_combos_filtros(self) -> None:
         dotaciones = self.records_service.listar_dotaciones(incluir_inactivos=False)
@@ -344,12 +375,19 @@ class NovedadesView(QWidget):
         self._actualizar_conteo()
 
     def _on_filter_changed(self) -> None:
-        # Columna 5 = Dotación, Columna 8 = Novedad
+        if not hasattr(self, "proxy_model"):
+            return
+        # Columna 5 = Dotación, Columna 8 = Novedad, Columna 10 = Fecha Fin
         dot = self.combo_dotacion.currentText()
         self.proxy_model.set_column_filter(5, dot)
 
         tipo = self.combo_tipo.currentText()
         self.proxy_model.set_column_filter(8, tipo)
+
+        if self.chk_ocultar_no_vigentes.isChecked():
+            self.proxy_model.set_custom_filter(self._filtro_vigente_fila)
+        else:
+            self.proxy_model.set_custom_filter(None)
 
         self._actualizar_conteo()
 
@@ -358,8 +396,9 @@ class NovedadesView(QWidget):
         self.combo_dotacion.setCurrentIndex(0)
         self.combo_tipo.setCurrentIndex(0)
         self.chk_filtrar_fecha.setCurrentIndex(0)
+        self.chk_ocultar_no_vigentes.setChecked(True)
         self.proxy_model.clear_all_filters()
-        self._actualizar_conteo()
+        self._on_filter_changed()
 
     def _actualizar_conteo(self) -> None:
         visibles = self.proxy_model.rowCount()

@@ -4,7 +4,7 @@ Permite combinar búsqueda rápida global, filtros por columnas específicas
 y rangos temporales sin bloquear la interfaz de usuario.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 from PySide6.QtCore import QModelIndex, QSortFilterProxyModel, Qt
 from datetime import date, datetime
 
@@ -21,6 +21,7 @@ class MultiFilterProxyModel(QSortFilterProxyModel):
         self._date_col_idx: Optional[int] = None
         self._date_from: Optional[date] = None
         self._date_to: Optional[date] = None
+        self._custom_filter: Optional[Callable[[Any, int, QModelIndex], bool]] = None
 
         self.setFilterCaseSensitivity(Qt.CaseInsensitive)
         self.setSortCaseSensitivity(Qt.CaseInsensitive)
@@ -47,11 +48,16 @@ class MultiFilterProxyModel(QSortFilterProxyModel):
         self._date_to = d_to
         self._refrescar_filtro()
 
+    def set_custom_filter(self, predicate: Optional[Callable[[Any, int, QModelIndex], bool]]) -> None:
+        self._custom_filter = predicate
+        self._refrescar_filtro()
+
     def clear_all_filters(self) -> None:
         self._global_search_text = ""
         self._column_filters.clear()
         self._date_from = None
         self._date_to = None
+        self._custom_filter = None
         self._refrescar_filtro()
 
     def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
@@ -96,6 +102,11 @@ class MultiFilterProxyModel(QSortFilterProxyModel):
                             return False
                 except Exception:
                     pass
+
+        # 4. Filtro personalizado por fila
+        if self._custom_filter is not None:
+            if not self._custom_filter(source_model, source_row, source_parent):
+                return False
 
         return True
 
