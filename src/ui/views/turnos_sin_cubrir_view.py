@@ -87,9 +87,15 @@ class TurnosSinCubrirView(QWidget):
         bar.addWidget(QLabel("Especialidad:"))
         self.combo_esp = QComboBox()
         self.combo_esp.addItem("Todas")
-        from src.core.config import ESPECIALIDADES_EMPLEADO
-        for esp in ESPECIALIDADES_EMPLEADO:
-            self.combo_esp.addItem(esp)
+        especialidades_db = self.records_service.listar_especialidades_empleados()
+        if especialidades_db:
+            for esp in especialidades_db:
+                self.combo_esp.addItem(esp)
+        else:
+            from src.core.config import ESPECIALIDADES_EMPLEADO
+
+            for esp in ESPECIALIDADES_EMPLEADO:
+                self.combo_esp.addItem(esp)
         self.combo_esp.currentIndexChanged.connect(self.consultar)
         bar.addWidget(self.combo_esp)
 

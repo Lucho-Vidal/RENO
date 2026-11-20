@@ -48,6 +48,23 @@ from src.domain.validators import (
 logger = get_logger("RecordsService")
 
 
+def _normalizar_especialidad(texto: Optional[str]) -> str:
+    """Normaliza una especialidad eliminando tildes, espacios extra y unificando Guardatren/Guarda."""
+    raw = " ".join(str(texto or "").strip().split())
+    nfkd = unicodedata.normalize("NFKD", raw)
+    sin_tildes = "".join(c for c in nfkd if not unicodedata.combining(c)).lower()
+    return re.sub(r"\bguarda\s*tren\b", "guarda", sin_tildes)
+
+
+def _coincide_especialidad(valor_db: Optional[str], filtro: Optional[str]) -> bool:
+    """Compara especialidades de forma insensible a mayúsculas, tildes y prefijo Guardatren/Guarda."""
+    f_norm = _normalizar_especialidad(filtro)
+    if not f_norm or f_norm == "todas":
+        return True
+    v_norm = _normalizar_especialidad(valor_db)
+    return v_norm == f_norm or f_norm in v_norm
+
+
 class RecordsService:
     """Servicio principal de negocio para novedades, cambios de turno, ciclo y dashboard."""
 
@@ -1496,11 +1513,10 @@ class RecordsService:
             if dotacion and dotacion != "Todas":
                 query += " AND n.dotacion = ?"
                 params.append(dotacion)
-            if especialidad and especialidad != "Todas":
-                query += " AND n.especialidad = ?"
-                params.append(especialidad)
             query += " ORDER BY n.dotacion, n.turnos, n.apellidos_nombres"
             filas = conn.execute(query, params).fetchall()
+            if especialidad and especialidad != "Todas":
+                filas = [f for f in filas if _coincide_especialidad(f["especialidad"], especialidad)]
 
             reemplazos_rows = conn.execute(
                 """SELECT id, novedad_id, legajo_reemplazo, apellidos_nombres_reemplazo,
@@ -1645,11 +1661,13 @@ class RecordsService:
             if dotacion and dotacion != "Todas":
                 query_emp += " AND LOWER(TRIM(dotacion)) = LOWER(TRIM(?))"
                 params_emp.append(dotacion)
-            if especialidad and especialidad != "Todas":
-                query_emp += " AND LOWER(TRIM(especialidad)) LIKE '%' || LOWER(TRIM(?)) || '%'"
-                params_emp.append(especialidad)
             query_emp += " ORDER BY dotacion, apellidos_nombres"
             empleados_ciclo = [dict(r) for r in conn.execute(query_emp, params_emp).fetchall()]
+            if especialidad and especialidad != "Todas":
+                empleados_ciclo = [
+                    emp for emp in empleados_ciclo
+                    if _coincide_especialidad(emp.get("especialidad"), especialidad)
+                ]
 
             reemplazos_activos = conn.execute(
                 """SELECT nr.*, n.legajo AS legajo_titular, n.apellidos_nombres AS apellidos_titular,
