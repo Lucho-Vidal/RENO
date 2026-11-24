@@ -20,7 +20,7 @@ from src.data.sync.outbox_queue import OutboxQueue
 from src.services.shared_sqlite_sync import SharedSQLiteSyncEngine
 from src.services.sync_service import MODO_LOCAL, MODO_SHARED_SQLITE, MODO_SUPABASE, SyncService
 from src.services.sync_worker import SyncBackgroundWorker
-from src.ui.dialogs.sincronizacion_config_dialog import SincronizacionConfigDialog
+from src.ui.views.dialogs.sincronizacion_config_dialog import SincronizacionConfigDialog
 
 
 def _get_app() -> QApplication:
@@ -281,7 +281,7 @@ def test_sync_worker_y_dialogo_config_ui(tmp_path: Path, monkeypatch):
     assert shared_path.exists()
 
     # Probar SincronizacionConfigDialog en offscreen
-    monkeypatch.setattr("src.ui.dialogs.sincronizacion_config_dialog.cargar_configuracion_app", lambda: dict(cfg))
+    monkeypatch.setattr("src.ui.views.dialogs.sincronizacion_config_dialog.cargar_configuracion_app", lambda: dict(cfg))
     dlg = SincronizacionConfigDialog(sync_service=svc)
     assert dlg.rb_shared.isChecked()
     assert dlg.grp_shared.isVisible() is False or True  # antes de show(), validar isChecked y visibilidad lógica

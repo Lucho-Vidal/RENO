@@ -19,6 +19,27 @@ from src.domain.validators import parsear_fecha
 logger = get_logger("ExcelService")
 
 
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+_MAX_EXCEL_IMPORT_BYTES = 50 * 1024 * 1024  # 50 MB
+
+
+def _sanitizar_celda_excel(value: Any) -> Any:
+    """Neutraliza fórmulas/DDE prefijando con apóstrofe celdas de texto potencialmente peligrosas."""
+    if isinstance(value, str) and value and value[0] in _FORMULA_PREFIXES:
+        return "'" + value
+    return value
+
+
+def _sanitizar_fila_excel(values: List[Any]) -> List[Any]:
+    return [_sanitizar_celda_excel(v) for v in values]
+
+
+def _validar_tamano_import_excel(file_path: str) -> None:
+    p = Path(file_path)
+    if p.exists() and p.stat().st_size > _MAX_EXCEL_IMPORT_BYTES:
+        raise ValueError(f"El archivo Excel supera el tamaño máximo permitido ({_MAX_EXCEL_IMPORT_BYTES // (1024 * 1024)} MB).")
+
+
 def _write_sheet(
     workbook: openpyxl.Workbook,
     title: str,
@@ -41,11 +62,11 @@ def _write_sheet(
 
     for row_data in rows:
         if keys:
-            ws.append([row_data.get(k, "") for k in keys])
+            ws.append(_sanitizar_fila_excel([row_data.get(k, "") for k in keys]))
         elif hasattr(row_data, "keys"):
-            ws.append([row_data[k] for k in row_data.keys()])
+            ws.append(_sanitizar_fila_excel([row_data[k] for k in row_data.keys()]))
         else:
-            ws.append(list(row_data))
+            ws.append(_sanitizar_fila_excel(list(row_data)))
 
     ws.freeze_panes = "A2"
     if ws.max_row > 1 and ws.max_column >= 1:
@@ -452,77 +473,12 @@ class ExcelService:
         wb.save(out_file)
         return str(out_file)
 
-    def export_ordenamientos(
-        self,
-        ordenamientos: List[Dict[str, Any]],
-        output_path: str,
-    ) -> str:
-        """Exporta el listado de Ordenamientos Operativos y sus tramos a un libro Excel."""
-        out_file = Path(output_path)
-        out_file.parent.mkdir(parents=True, exist_ok=True)
-
-        wb = openpyxl.Workbook()
-        wb.remove(wb.active)
-
-        _write_sheet(
-            wb,
-            "Ordenamientos",
-            [
-                "ID", "N° ORDEN", "FECHA EMISIÓN", "HORA EMISIÓN", "LEGAJO",
-                "NOMBRE Y APELLIDO", "DOTACIÓN", "ITINERARIO", "TURNO / CICLO",
-                "RÉGIMEN", "TRENES", "MOTIVO DE LA ORDEN", "REF ESTACIÓN",
-                "EMISOR", "USUARIO WINDOWS", "OBSERVACIONES",
-            ],
-            ordenamientos,
-            [
-                "id", "nro_orden", "fecha_emision", "hora_emision", "legajo_personal",
-                "nombre_personal", "deposito", "itinerario", "ciclo_o_turno",
-                "regimen", "trenes_involucrados", "motivo_orden", "ref_pct",
-                "emisor", "usuario_windows", "observacion_pie",
-            ],
-        )
-
-        # Hoja de detalle de tramos si están disponibles en la BD
-        with self.db.read_connection() as conn:
-            ids = [int(o["id"]) for o in ordenamientos if o.get("id")]
-            if ids:
-                placeholders = ",".join("?" for _ in ids)
-                tramos_rows = conn.execute(
-                    f"""
-                    SELECT o.nro_orden, o.fecha_emision, o.legajo_personal, o.nombre_personal,
-                           o.deposito, ot.nro_secuencia, ot.ref, ot.nro_tren,
-                           ot.origen, ot.hora_salida, ot.destino, ot.hora_llegada, ot.observaciones
-                    FROM ordenamiento_tramos ot
-                    JOIN ordenamientos o ON o.id = ot.ordenamiento_id
-                    WHERE o.id IN ({placeholders})
-                    ORDER BY o.id ASC, ot.nro_secuencia ASC
-                    """,
-                    ids,
-                ).fetchall()
-                _write_sheet(
-                    wb,
-                    "Detalle de Tramos",
-                    [
-                        "N° ORDEN", "FECHA", "LEGAJO", "AGENTE", "DOTACIÓN",
-                        "SECUENCIA", "REF", "N° TREN", "ORIGEN", "HORA SALIDA",
-                        "DESTINO", "HORA LLEGADA", "OBSERVACIONES",
-                    ],
-                    [dict(r) for r in tramos_rows],
-                    [
-                        "nro_orden", "fecha_emision", "legajo_personal", "nombre_personal", "deposito",
-                        "nro_secuencia", "ref", "nro_tren", "origen", "hora_salida",
-                        "destino", "hora_llegada", "observaciones",
-                    ],
-                )
-
-        wb.save(out_file)
-        return str(out_file)
-
     # ---------------------------------------------------------
     # Importaciones de Excel
     # ---------------------------------------------------------
 
     def import_base_empleados(self, file_path: str) -> Tuple[int, int]:
+        _validar_tamano_import_excel(file_path)
         wb = openpyxl.load_workbook(file_path, data_only=True)
         sheet_name = "BASE" if "BASE" in wb.sheetnames else wb.sheetnames[0]
         ws = wb[sheet_name]
@@ -591,34 +547,8 @@ class ExcelService:
 
         return insertados, actualizados
 
-    def import_catalog(
-        self,
-        table_name: str,
-        column_name: str,
-        file_path: str,
-        clear_existing: bool = False,
-    ) -> int:
-        wb = openpyxl.load_workbook(file_path, data_only=True)
-        ws = wb.active
-        items = set()
-        for row in ws.iter_rows(values_only=True):
-            if row and row[0] is not None:
-                val = str(row[0]).strip()
-                if val and val.lower() not in ("nombre", "tipo", "dotacion", "tipo de novedad"):
-                    items.add(val)
-
-        with self.db.write_transaction() as conn:
-            if clear_existing:
-                conn.execute(f"UPDATE {table_name} SET activo = 0")
-            for item in items:
-                conn.execute(
-                    f"INSERT INTO {table_name} ({column_name}, activo) VALUES (?, 1) "
-                    f"ON CONFLICT({column_name}) DO UPDATE SET activo = 1",
-                    (item,),
-                )
-        return len(items)
-
     def import_personal_estacion_sheet(self, file_path: str, clear_existing: bool = False) -> int:
+        _validar_tamano_import_excel(file_path)
         wb = openpyxl.load_workbook(file_path, data_only=True)
         ws = wb.active
         items = []
@@ -727,72 +657,6 @@ class ExcelService:
         wb.save(out_file)
         return str(out_file)
 
-    def export_ordenamientos(
-        self,
-        ordenamientos: List[Dict[str, Any]],
-        output_path: str,
-    ) -> str:
-        """Exporta el listado de Ordenamientos Operativos y sus tramos a un libro Excel."""
-        out_file = Path(output_path)
-        out_file.parent.mkdir(parents=True, exist_ok=True)
-
-        wb = openpyxl.Workbook()
-        wb.remove(wb.active)
-
-        _write_sheet(
-            wb,
-            "Ordenamientos",
-            [
-                "ID", "N° ORDEN", "FECHA EMISIÓN", "HORA EMISIÓN", "LEGAJO",
-                "NOMBRE Y APELLIDO", "DOTACIÓN", "ITINERARIO", "TURNO / CICLO",
-                "RÉGIMEN", "TRENES", "MOTIVO DE LA ORDEN", "REF ESTACIÓN",
-                "EMISOR", "USUARIO WINDOWS", "OBSERVACIONES",
-            ],
-            ordenamientos,
-            [
-                "id", "nro_orden", "fecha_emision", "hora_emision", "legajo_personal",
-                "nombre_personal", "deposito", "itinerario", "ciclo_o_turno",
-                "regimen", "trenes_involucrados", "motivo_orden", "ref_pct",
-                "emisor", "usuario_windows", "observacion_pie",
-            ],
-        )
-
-        # Hoja de detalle de tramos si están disponibles en la BD
-        with self.db.read_connection() as conn:
-            ids = [int(o["id"]) for o in ordenamientos if o.get("id")]
-            if ids:
-                placeholders = ",".join("?" for _ in ids)
-                tramos_rows = conn.execute(
-                    f"""
-                    SELECT o.nro_orden, o.fecha_emision, o.legajo_personal, o.nombre_personal,
-                           o.deposito, ot.nro_secuencia, ot.ref, ot.nro_tren,
-                           ot.origen, ot.hora_salida, ot.destino, ot.hora_llegada, ot.observaciones
-                    FROM ordenamiento_tramos ot
-                    JOIN ordenamientos o ON o.id = ot.ordenamiento_id
-                    WHERE o.id IN ({placeholders})
-                    ORDER BY o.id ASC, ot.nro_secuencia ASC
-                    """,
-                    ids,
-                ).fetchall()
-                _write_sheet(
-                    wb,
-                    "Detalle de Tramos",
-                    [
-                        "N° ORDEN", "FECHA", "LEGAJO", "AGENTE", "DOTACIÓN",
-                        "SECUENCIA", "REF", "N° TREN", "ORIGEN", "HORA SALIDA",
-                        "DESTINO", "HORA LLEGADA", "OBSERVACIONES",
-                    ],
-                    [dict(r) for r in tramos_rows],
-                    [
-                        "nro_orden", "fecha_emision", "legajo_personal", "nombre_personal", "deposito",
-                        "nro_secuencia", "ref", "nro_tren", "origen", "hora_salida",
-                        "destino", "hora_llegada", "observaciones",
-                    ],
-                )
-
-        wb.save(out_file)
-        return str(out_file)
-
     def export_calendario_ciclo_todos(
         self,
         output_path: str,
@@ -846,7 +710,7 @@ class ExcelService:
                 emp.get("franco", ""),
             ]
             for row_data in dias_datos:
-                row_vals = emp_prefix + [row_data.get(k, "") for k in keys_dia]
+                row_vals = _sanitizar_fila_excel(emp_prefix + [row_data.get(k, "") for k in keys_dia])
                 ws.append(row_vals)
                 curr_row = ws.max_row
                 estado = str(row_data.get("estado", ""))
@@ -866,73 +730,6 @@ class ExcelService:
 
         wb.save(out_file)
         return str(out_file)
-
-    def export_ordenamientos(
-        self,
-        ordenamientos: List[Dict[str, Any]],
-        output_path: str,
-    ) -> str:
-        """Exporta el listado de Ordenamientos Operativos y sus tramos a un libro Excel."""
-        out_file = Path(output_path)
-        out_file.parent.mkdir(parents=True, exist_ok=True)
-
-        wb = openpyxl.Workbook()
-        wb.remove(wb.active)
-
-        _write_sheet(
-            wb,
-            "Ordenamientos",
-            [
-                "ID", "N° ORDEN", "FECHA EMISIÓN", "HORA EMISIÓN", "LEGAJO",
-                "NOMBRE Y APELLIDO", "DOTACIÓN", "ITINERARIO", "TURNO / CICLO",
-                "RÉGIMEN", "TRENES", "MOTIVO DE LA ORDEN", "REF ESTACIÓN",
-                "EMISOR", "USUARIO WINDOWS", "OBSERVACIONES",
-            ],
-            ordenamientos,
-            [
-                "id", "nro_orden", "fecha_emision", "hora_emision", "legajo_personal",
-                "nombre_personal", "deposito", "itinerario", "ciclo_o_turno",
-                "regimen", "trenes_involucrados", "motivo_orden", "ref_pct",
-                "emisor", "usuario_windows", "observacion_pie",
-            ],
-        )
-
-        # Hoja de detalle de tramos si están disponibles en la BD
-        with self.db.read_connection() as conn:
-            ids = [int(o["id"]) for o in ordenamientos if o.get("id")]
-            if ids:
-                placeholders = ",".join("?" for _ in ids)
-                tramos_rows = conn.execute(
-                    f"""
-                    SELECT o.nro_orden, o.fecha_emision, o.legajo_personal, o.nombre_personal,
-                           o.deposito, ot.nro_secuencia, ot.ref, ot.nro_tren,
-                           ot.origen, ot.hora_salida, ot.destino, ot.hora_llegada, ot.observaciones
-                    FROM ordenamiento_tramos ot
-                    JOIN ordenamientos o ON o.id = ot.ordenamiento_id
-                    WHERE o.id IN ({placeholders})
-                    ORDER BY o.id ASC, ot.nro_secuencia ASC
-                    """,
-                    ids,
-                ).fetchall()
-                _write_sheet(
-                    wb,
-                    "Detalle de Tramos",
-                    [
-                        "N° ORDEN", "FECHA", "LEGAJO", "AGENTE", "DOTACIÓN",
-                        "SECUENCIA", "REF", "N° TREN", "ORIGEN", "HORA SALIDA",
-                        "DESTINO", "HORA LLEGADA", "OBSERVACIONES",
-                    ],
-                    [dict(r) for r in tramos_rows],
-                    [
-                        "nro_orden", "fecha_emision", "legajo_personal", "nombre_personal", "deposito",
-                        "nro_secuencia", "ref", "nro_tren", "origen", "hora_salida",
-                        "destino", "hora_llegada", "observaciones",
-                    ],
-                )
-
-        wb.save(out_file)
-        return str(out_file)
-
 
     def export_auditoria(
         self,
@@ -1005,7 +802,7 @@ class ExcelService:
                 val = log.get(k)
                 if val is None:
                     val = ""
-                cell = ws.cell(row=r_idx, column=c_idx, value=str(val))
+                cell = ws.cell(row=r_idx, column=c_idx, value=_sanitizar_celda_excel(str(val)))
                 cell.font = Font(name="Segoe UI", size=9)
                 cell.border = thin_border
                 cell.fill = fill
@@ -1090,7 +887,7 @@ class ExcelService:
                     row_vals.append(ev.get("fecha_display") or "")
                     estados_fila.append(ev.get("estado_alerta") or "SIN_REGISTRO")
 
-            ws.append(row_vals)
+            ws.append(_sanitizar_fila_excel(row_vals))
             curr_row = ws.max_row
             for offset, est in enumerate(estados_fila):
                 cell = ws.cell(row=curr_row, column=6 + offset)
@@ -1141,7 +938,7 @@ class ExcelService:
             cell.font = header_font
 
         for f in filas:
-            ws.append([
+            ws.append(_sanitizar_fila_excel([
                 f.get("legajo", ""),
                 f.get("apellidos_nombres", ""),
                 f.get("remocion_nombre", "") or "-",
@@ -1154,7 +951,7 @@ class ExcelService:
                 f.get("especialidad", ""),
                 f.get("motivo", ""),
                 f.get("observaciones", ""),
-            ])
+            ]))
 
         ws.freeze_panes = "A2"
         if ws.max_row > 1:

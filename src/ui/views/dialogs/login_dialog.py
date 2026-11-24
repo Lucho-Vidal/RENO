@@ -303,12 +303,13 @@ class LoginDialog(BaseDialog):
                 )
                 MailService.enviar_sin_rastro([dest], asunto, cuerpo)
 
-            email, _ = self.auth_service.resetear_password(user, send_fn=enviar_outlook)
+            self.auth_service.resetear_password(user, send_fn=enviar_outlook)
             QMessageBox.information(
                 self,
-                "Correo Enviado",
-                f"Se ha enviado la contraseña temporal al correo {email} mediante Outlook.\n"
-                f"Revise su bandeja de entrada e ingrese con la clave recibida.",
+                "Solicitud Procesada",
+                "Si el usuario existe y se encuentra activo, se ha enviado una contraseña temporal "
+                "al correo institucional registrado mediante Outlook.\n"
+                "Revise su bandeja de entrada e ingrese con la clave recibida.",
             )
         except Exception as e:
             QMessageBox.critical(self, "Error", f"No se pudo restablecer la contraseña:\n{e}")

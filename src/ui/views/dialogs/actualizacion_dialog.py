@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from typing import Any, Optional
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFrame,
@@ -94,6 +95,7 @@ class ActualizacionDialog(BaseDialog):
         lbl_sub.setStyleSheet("font-size: 9.5pt; color: #64748B;")
 
         lbl_titulo = QLabel(self.info.titulo)
+        lbl_titulo.setTextFormat(Qt.PlainText)
         lbl_titulo.setStyleSheet("font-size: 10pt; font-weight: 600; color: #334155;")
         lbl_titulo.setWordWrap(True)
 
@@ -248,16 +250,19 @@ class ActualizacionDialog(BaseDialog):
 
     def _cargar_novedades_html(self) -> None:
         """Formatea las novedades en HTML limpio y legible."""
+        import html as _html
+
         items_html = ""
         for nov in self.info.novedades:
             # Resaltar etiquetas como [Operación], [Seguridad], etc.
-            linea = nov.strip()
+            linea = str(nov or "").strip()
             if linea.startswith("[") and "]" in linea:
                 tag, resto = linea.split("]", 1)
-                tag_clean = tag.lstrip("[").strip()
-                linea_html = f"<b><span style='color: #0369A1;'>[{tag_clean}]</span></b> {resto.strip()}"
+                tag_clean = _html.escape(tag.lstrip("[").strip())
+                resto_clean = _html.escape(resto.strip())
+                linea_html = f"<b><span style='color: #0369A1;'>[{tag_clean}]</span></b> {resto_clean}"
             else:
-                linea_html = linea
+                linea_html = _html.escape(linea)
             items_html += f"<li style='margin-bottom: 6px; line-height: 1.3;'>{linea_html}</li>"
 
         html = f"""

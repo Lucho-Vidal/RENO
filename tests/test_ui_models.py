@@ -109,20 +109,20 @@ def test_cambiar_password_dialog_and_service(qapp, tmp_path, monkeypatch):
     db = DatabaseManager(tmp_path / "test_pwd.sqlite")
     init_database_schema(db)
     auth = AuthService(db)
-    uid = auth.crear_administrador_inicial("operador.test", "clave1", legajo=555)
-    user = auth.autenticar("OPERADOR.TEST", "clave1")
+    uid = auth.crear_administrador_inicial("operador.test", "ClaveInicial1", legajo=555)
+    user = auth.autenticar("OPERADOR.TEST", "ClaveInicial1")
     assert user is not None
 
     dlg = CambiarMiPasswordDialog(auth, user)
     assert dlg.btn_save.isDefault() is True
     assert dlg.btn_cancel.isDefault() is False
 
-    dlg.txt_actual.setText("clave1")
-    dlg.txt_nueva.setText("123")
-    dlg.txt_confirm.setText("123")
+    dlg.txt_actual.setText("ClaveInicial1")
+    dlg.txt_nueva.setText("NuevaClave2026")
+    dlg.txt_confirm.setText("NuevaClave2026")
     dlg._on_guardar()
 
     assert dlg.result() == CambiarMiPasswordDialog.Accepted
-    assert auth.autenticar("operador.test", "123") is not None
-    assert auth.autenticar("operador.test", "clave1") is None
+    assert auth.autenticar("operador.test", "NuevaClave2026") is not None
+    assert auth.autenticar("operador.test", "ClaveInicial1") is None
 

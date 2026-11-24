@@ -137,7 +137,7 @@ def test_descargar_archivo_con_proxy_directo_manual_y_rewind(qapp, tmp_path):
         def __exit__(self, *args):
             return False
 
-    # 1. Modo Manual incluye Proxy-Authorization Basic en request
+    # 1. Modo Manual configura credenciales en ProxyHandler sin inyectar Proxy-Authorization manual en Request
     fake_opener = MagicMock()
     captured = {}
 
@@ -148,7 +148,7 @@ def test_descargar_archivo_con_proxy_directo_manual_y_rewind(qapp, tmp_path):
     fake_opener.open.side_effect = _open_manual
     out_manual = tmp_path / "manual.bin"
     progreso = []
-    with patch("src.core.proxy.urllib.request.build_opener", return_value=fake_opener):
+    with patch("src.core.proxy.urllib.request.build_opener", return_value=fake_opener) as mock_build:
         with open(out_manual, "wb") as f:
             nbytes = descargar_archivo_con_proxy(
                 {
@@ -164,7 +164,9 @@ def test_descargar_archivo_con_proxy_directo_manual_y_rewind(qapp, tmp_path):
             )
     assert nbytes == len(b"INSTALLER_BYTES_OK")
     assert out_manual.read_bytes() == b"INSTALLER_BYTES_OK"
-    assert captured["proxy_auth"] and captured["proxy_auth"].startswith("Basic ")
+    assert captured["proxy_auth"] is None
+    handler_usado = mock_build.call_args[0][0]
+    assert "alice:wonder@proxy.corp.local:8080" in handler_usado.proxies["https"]
     assert progreso[-1] == (len(b"INSTALLER_BYTES_OK"), len(b"INSTALLER_BYTES_OK"))
 
     # 2. Modo SSO: si QNAM escribe bytes parciales y retorna 407, _reset_stream trunca antes de fallback

@@ -20,6 +20,7 @@ from src.ui.views.dialogs.admin_dialogs import (
     AdminBackupsWidget,
     AdminCatalogosWidget,
     AdminConfigWidget,
+    AdminDestinatariosWidget,
     AdminEliminadosWidget,
     AdminRolesWidget,
     AdminUsuariosWidget,
@@ -30,8 +31,9 @@ class AdministracionView(QWidget):
     """Pestaña principal de Administración con sub-pestañas:
     1. 👥 Usuarios y Roles
     2. 📋 Catálogos Operativos
-    3. 💾 Seguridad y Auditoría
-    4. ⚙️ Configuración del Sistema
+    3. 📧 Destinatarios de Correo
+    4. 💾 Seguridad y Auditoría
+    5. ⚙️ Configuración del Sistema
     """
 
     def __init__(
@@ -58,7 +60,7 @@ class AdministracionView(QWidget):
 
     def _can(self, permission_code: str) -> bool:
         if self.tiene_permiso_fn is None:
-            return True
+            return False
         return bool(self.tiene_permiso_fn(permission_code))
 
     def _init_ui(self) -> None:
@@ -102,7 +104,20 @@ class AdministracionView(QWidget):
             )
             self.tabs.addTab(self.widget_catalogos, "📋 Catálogos Operativos")
 
-        # 3. Sub-pestaña: Seguridad y Auditoría (Backups, Auditoría, Eliminados)
+        # 3. Sub-pestaña: Destinatarios de Correo
+        if (
+            self._can("destinatarios_informe.administrar")
+            or self._can("destinatarios_ordenamiento.administrar")
+        ):
+            self.widget_destinatarios = AdminDestinatariosWidget(
+                self.records_service,
+                usuario_actual=self.usuario_actual,
+                tiene_permiso_fn=self.tiene_permiso_fn,
+                parent=self,
+            )
+            self.tabs.addTab(self.widget_destinatarios, "📧 Destinatarios de Correo")
+
+        # 4. Sub-pestaña: Seguridad y Auditoría (Backups, Auditoría, Eliminados)
         if (
             self._can("backup.gestionar")
             or self._can("auditoria.ver")
@@ -119,7 +134,11 @@ class AdministracionView(QWidget):
                 subtabs_sa.addTab(self.widget_backups, "💾 Copias de Seguridad (Backups)")
 
             if self._can("auditoria.ver"):
-                self.widget_auditoria = AdminAuditoriaWidget(self.records_service, parent=self)
+                self.widget_auditoria = AdminAuditoriaWidget(
+                    self.records_service,
+                    excel_service=self.excel_service,
+                    parent=self,
+                )
                 subtabs_sa.addTab(self.widget_auditoria, "📜 Trazabilidad y Auditoría")
 
             if self._can("registros.recuperar"):
@@ -133,7 +152,7 @@ class AdministracionView(QWidget):
             lay_sa.addWidget(subtabs_sa)
             self.tabs.addTab(tab_seg_aud, "💾 Seguridad y Auditoría")
 
-        # 4. Sub-pestaña: Configuración del Sistema
+        # 5. Sub-pestaña: Configuración del Sistema
         if self._can("sesion.configurar"):
             self.widget_config = AdminConfigWidget(
                 self.db,
@@ -154,6 +173,8 @@ class AdministracionView(QWidget):
             self.widget_roles.recargar()
         if hasattr(self, "widget_catalogos"):
             self.widget_catalogos.recargar_todo()
+        if hasattr(self, "widget_destinatarios"):
+            self.widget_destinatarios.recargar()
         if hasattr(self, "widget_backups"):
             self.widget_backups.recargar()
         if hasattr(self, "widget_auditoria"):

@@ -5,7 +5,6 @@ gestiona políticas de retención y verificación previa de integridad en restau
 """
 
 import os
-import shutil
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +16,7 @@ from src.data.database import DatabaseManager
 logger = get_logger("BackupService")
 
 DIRECTORIO_BACKUPS = "backups"
+_TABLAS_NUCLEO_RENO = frozenset({"usuarios", "empleados", "novedades", "configuracion"})
 
 
 class BackupService:
@@ -25,14 +25,25 @@ class BackupService:
     def __init__(self, db: DatabaseManager):
         self.db = db
 
+    def _resolver_ruta_backup_segura(self, backup_filename: str) -> str:
+        """Valida que el nombre de archivo no contenga path traversal y pertenezca al directorio de backups."""
+        nombre = str(backup_filename or "").strip()
+        if not nombre or Path(nombre).name != nombre or not nombre.lower().endswith(".sqlite"):
+            raise ValueError(f"Nombre de archivo de backup inválido: {backup_filename!r}")
+        directorio = Path(self.ruta_directorio_backups()).resolve()
+        ruta = (directorio / nombre).resolve()
+        if not ruta.is_relative_to(directorio):
+            raise ValueError("Ruta de backup fuera del directorio permitido.")
+        return str(ruta)
+
     def ruta_directorio_backups(self) -> str:
         try:
             with self.db.read_connection() as conn:
                 row = conn.execute("SELECT valor FROM configuracion WHERE clave='backup_directorio'").fetchone()
                 if row and row[0] and os.path.isdir(str(row[0]).strip()):
                     return str(row[0]).strip()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("No se pudo leer backup_directorio desde configuracion: %s", e)
         base_dir = os.path.dirname(self.db.db_path) or "."
         ruta = os.path.join(base_dir, DIRECTORIO_BACKUPS)
         os.makedirs(ruta, exist_ok=True)
@@ -96,13 +107,12 @@ class BackupService:
 
         destino_tmp = destino + ".tmp"
         try:
-            origen = sqlite3.connect(self.db.db_path)
-            destino_con = sqlite3.connect(destino_tmp)
-            try:
-                origen.backup(destino_con)
-            finally:
-                destino_con.close()
-                origen.close()
+            with self.db.read_connection() as origen:
+                destino_con = sqlite3.connect(destino_tmp)
+                try:
+                    origen.backup(destino_con)
+                finally:
+                    destino_con.close()
             os.replace(destino_tmp, destino)
             if not directorio_destino:
                 self.aplicar_retencion()
@@ -118,31 +128,38 @@ class BackupService:
             raise
 
     def restaurar_backup(self, backup_filename: str) -> None:
-        directorio = self.ruta_directorio_backups()
-        ruta_origen = os.path.join(directorio, backup_filename)
+        ruta_origen = self._resolver_ruta_backup_segura(backup_filename)
         if not os.path.isfile(ruta_origen):
             raise FileNotFoundError(f"El archivo de copia de seguridad {backup_filename} no existe.")
 
-        # Verificar integridad del archivo a restaurar
+        # Verificar integridad y estructura mínima de RENO del archivo a restaurar
         con_verif = sqlite3.connect(ruta_origen)
         try:
             check = con_verif.execute("PRAGMA integrity_check").fetchone()
             if not check or check[0].lower() != "ok":
                 raise RuntimeError(f"El archivo de backup está corrupto: {check}")
+            tablas = {
+                str(r[0]).lower()
+                for r in con_verif.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            }
+            faltantes = _TABLAS_NUCLEO_RENO - tablas
+            if faltantes:
+                raise ValueError(
+                    f"El archivo no corresponde a una base de datos RENO válida (faltan tablas: {', '.join(sorted(faltantes))})."
+                )
         finally:
             con_verif.close()
 
         # Crear un backup preventivo de seguridad antes de sobreescribir
         self.crear_backup()
 
-        # Restaurar
-        origen = sqlite3.connect(ruta_origen)
-        destino = sqlite3.connect(self.db.db_path)
-        try:
-            origen.backup(destino)
-        finally:
-            destino.close()
-            origen.close()
+        # Restaurar bajo bloqueo coordinado del DatabaseManager
+        with self.db.write_transaction() as destino:
+            origen = sqlite3.connect(ruta_origen)
+            try:
+                origen.backup(destino)
+            finally:
+                origen.close()
 
         # Asegurar esquema completo v2 (por si el backup proviene de una versión anterior)
         from src.data.migrations import init_database_schema
@@ -151,8 +168,7 @@ class BackupService:
         logger.info(f"Base de datos restaurada exitosamente desde {backup_filename}.")
 
     def eliminar_backup(self, backup_filename: str) -> None:
-        directorio = self.ruta_directorio_backups()
-        ruta = os.path.join(directorio, backup_filename)
+        ruta = self._resolver_ruta_backup_segura(backup_filename)
         if os.path.isfile(ruta):
             os.remove(ruta)
             logger.info(f"Backup eliminado: {backup_filename}")

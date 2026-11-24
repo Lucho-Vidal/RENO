@@ -37,6 +37,7 @@ class SyncService:
         self.supabase_sync = supabase_sync
         self._config_provider = config_provider or cargar_configuracion_app
         self._lock = threading.Lock()
+        self._state_lock = threading.Lock()
         self._conectado: bool = False
         self._ultimo_sync: str | None = None
         self._ultimo_error: str = ""
@@ -204,12 +205,17 @@ class SyncService:
     def get_estado_sincronizacion(self) -> dict[str, Any]:
         modo = self.get_mode()
         pendientes = self.contar_pendientes()
+        with self._state_lock:
+            conectado = self._conectado if modo != MODO_LOCAL else False
+            ultimo_sync = self._ultimo_sync
+            ultimo_error = self._ultimo_error
+            ultimo_mensaje = self._ultimo_mensaje
         return {
             "modo": modo,
             "configurado": self.is_configured(),
-            "conectado": self._conectado if modo != MODO_LOCAL else False,
+            "conectado": conectado,
             "pendientes": pendientes,
-            "ultimo_sync": self._ultimo_sync,
-            "error": self._ultimo_error,
-            "mensaje": self._ultimo_mensaje,
+            "ultimo_sync": ultimo_sync,
+            "error": ultimo_error,
+            "mensaje": ultimo_mensaje,
         }

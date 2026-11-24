@@ -52,14 +52,14 @@ class OutboxQueue:
             placeholders = ",".join("?" for _ in ids)
             conn.execute(f"DELETE FROM sync_outbox WHERE id IN ({placeholders});", ids)
 
-    def marcar_sincronizados(self, ids: list[int]) -> None:
-        if not ids:
+    def eliminar_procesados_con_version(self, items: list[tuple[int, str]]) -> None:
+        """Elimina ítems procesados solo si su timestamp creado_en no cambió mientras se sincronizaba."""
+        if not items:
             return
         with self.db.write_transaction() as conn:
-            placeholders = ",".join("?" for _ in ids)
-            conn.execute(
-                f"UPDATE sync_outbox SET estado = 'SINCRONIZADO', ultimo_error = NULL WHERE id IN ({placeholders});",
-                ids,
+            conn.executemany(
+                "DELETE FROM sync_outbox WHERE id = ? AND creado_en = ?;",
+                items,
             )
 
     def registrar_fallo(self, item_id: int, mensaje_error: str) -> None:

@@ -163,7 +163,7 @@ class NovedadesView(QWidget):
         self.excel_service = excel_service
         self.pdf_service = pdf_service
         self.usuario_actual = usuario_actual or {}
-        self.tiene_permiso = tiene_permiso_fn or (lambda p: True)
+        self.tiene_permiso = tiene_permiso_fn or (lambda _p: False)
 
         self._init_ui()
         self.recargar_datos()
@@ -184,11 +184,17 @@ class NovedadesView(QWidget):
 
         self.btn_editar = QPushButton("✏️ Modificar")
         self.btn_editar.setObjectName("btnSecondary")
+        self.btn_editar.setEnabled(
+            self.tiene_permiso("novedades.editar") or self.tiene_permiso("registros.modificar")
+        )
         self.btn_editar.clicked.connect(self._modificar_novedad)
         toolbar.addWidget(self.btn_editar)
 
         self.btn_eliminar = QPushButton("🗑️ Eliminar")
         self.btn_eliminar.setObjectName("btnDanger")
+        self.btn_eliminar.setEnabled(
+            self.tiene_permiso("novedades.eliminar") or self.tiene_permiso("registros.modificar")
+        )
         self.btn_eliminar.clicked.connect(self._eliminar_novedad)
         toolbar.addWidget(self.btn_eliminar)
 
@@ -250,10 +256,13 @@ class NovedadesView(QWidget):
 
         # Filtro Rango de Fechas
         filter_layout.addWidget(QLabel("Desde:"))
-        self.date_desde = QDateEdit()
+        self.date_desde = QDateEdit(filter_frame)
         self.date_desde.setCalendarPopup(True)
         self.date_desde.setDisplayFormat("dd/MM/yyyy")
         self.date_desde.setDate(QDate.currentDate().addDays(-30))
+        self.date_desde.setEnabled(False)
+        self.date_desde.dateChanged.connect(self._on_filter_changed)
+        filter_layout.addWidget(self.date_desde)
         self.chk_filtrar_fecha = QComboBox()
         self.chk_filtrar_fecha.addItems(["Todas las fechas", "Filtrar por fecha"])
         self.chk_filtrar_fecha.currentIndexChanged.connect(self._on_filter_changed)
@@ -377,12 +386,19 @@ class NovedadesView(QWidget):
     def _on_filter_changed(self) -> None:
         if not hasattr(self, "proxy_model"):
             return
-        # Columna 5 = Dotación, Columna 8 = Novedad, Columna 10 = Fecha Fin
+        # Columna 5 = Dotación, Columna 8 = Novedad, Columna 9 = Fecha Inicio, Columna 10 = Fecha Fin
         dot = self.combo_dotacion.currentText()
         self.proxy_model.set_column_filter(5, dot)
 
         tipo = self.combo_tipo.currentText()
         self.proxy_model.set_column_filter(8, tipo)
+
+        filtrar_fecha = self.chk_filtrar_fecha.currentIndex() == 1
+        self.date_desde.setEnabled(filtrar_fecha)
+        if filtrar_fecha:
+            self.proxy_model.set_date_range(9, self.date_desde.date().toPython(), None)
+        else:
+            self.proxy_model.set_date_range(None, None, None)
 
         if self.chk_ocultar_no_vigentes.isChecked():
             self.proxy_model.set_custom_filter(self._filtro_vigente_fila)
@@ -414,6 +430,9 @@ class NovedadesView(QWidget):
         return self.table_model.get_row(source_idx.row())
 
     def _nueva_novedad(self) -> None:
+        if not self.tiene_permiso("novedades.crear"):
+            QMessageBox.warning(self, "Acceso denegado", "No tiene permisos para crear novedades.")
+            return
         dlg = NovedadDialog(
             self.records_service,
             usuario_actual=self.usuario_actual,
@@ -424,6 +443,11 @@ class NovedadesView(QWidget):
             self.registro_modificado.emit()
 
     def _modificar_novedad(self) -> None:
+        puede_modificar_libre = self.tiene_permiso("registros.modificar")
+        if not (puede_modificar_libre or self.tiene_permiso("novedades.editar")):
+            QMessageBox.warning(self, "Acceso denegado", "No tiene permisos para modificar novedades.")
+            return
+
         fila = self._obtener_fila_seleccionada()
         if not fila:
             QMessageBox.information(self, "Modificar", "Seleccione una novedad en la tabla.")
@@ -431,7 +455,6 @@ class NovedadesView(QWidget):
 
         nov_id = fila["id"]
         # Chequeo de permisos y ventana de edición
-        puede_modificar_libre = self.tiene_permiso("registros.modificar")
         dentro_ventana = self.records_service.dentro_de_ventana(fila["registrado_en"], "editar_horas")
         falta_fecha_fin = not fila.get("fecha_fin") or fila.get("fecha_fin") == "-"
 
@@ -462,12 +485,16 @@ class NovedadesView(QWidget):
             self.registro_modificado.emit()
 
     def _eliminar_novedad(self) -> None:
+        puede_eliminar_libre = self.tiene_permiso("registros.modificar")
+        if not (puede_eliminar_libre or self.tiene_permiso("novedades.eliminar")):
+            QMessageBox.warning(self, "Acceso denegado", "No tiene permisos para eliminar novedades.")
+            return
+
         fila = self._obtener_fila_seleccionada()
         if not fila:
             QMessageBox.information(self, "Eliminar", "Seleccione una novedad en la tabla.")
             return
 
-        puede_eliminar_libre = self.tiene_permiso("registros.modificar")
         dentro_ventana = self.records_service.dentro_de_ventana(fila["registrado_en"], "eliminar_horas")
 
         if not puede_eliminar_libre and not dentro_ventana:
@@ -541,6 +568,7 @@ class NovedadesView(QWidget):
             QMessageBox.information(self, "Enviar por Mail", "Seleccione una novedad en la tabla.")
             return
         try:
+            import html as _html
             import os
             import tempfile
             from src.services.mail_service import MailService
@@ -554,13 +582,13 @@ class NovedadesView(QWidget):
             emails = [d["email"] for d in dests if d.get("email")]
             asunto = f"Informe de Novedad #{fila['id']} - {fila.get('apellidos_nombres')} (Leg. {fila.get('legajo')})"
             cuerpo = (
-                f"<p>Se adjunta constancia de novedad operativa <b>#{fila['id']}</b> ({fila.get('novedad')}).</p>"
+                f"<p>Se adjunta constancia de novedad operativa <b>#{_html.escape(str(fila['id']))}</b> ({_html.escape(str(fila.get('novedad') or ''))}).</p>"
                 f"<ul>"
-                f"<li><b>Agente:</b> {fila.get('apellidos_nombres')} (Leg. {fila.get('legajo')})</li>"
-                f"<li><b>Dotación:</b> {fila.get('dotacion')} | <b>Especialidad:</b> {fila.get('especialidad')}</li>"
-                f"<li><b>Desde:</b> {fila.get('fecha_inicio')} | <b>Hasta:</b> {fila.get('fecha_fin') or '-'}</li>"
-                f"<li><b>Ref. Estación:</b> {fila.get('referencia_estacion')} | <b>Supervisor:</b> {fila.get('supervisor')}</li>"
-                f"<li><b>Observaciones:</b> {fila.get('observaciones') or '-'}</li>"
+                f"<li><b>Agente:</b> {_html.escape(str(fila.get('apellidos_nombres') or ''))} (Leg. {_html.escape(str(fila.get('legajo') or ''))})</li>"
+                f"<li><b>Dotación:</b> {_html.escape(str(fila.get('dotacion') or ''))} | <b>Especialidad:</b> {_html.escape(str(fila.get('especialidad') or ''))}</li>"
+                f"<li><b>Desde:</b> {_html.escape(str(fila.get('fecha_inicio') or ''))} | <b>Hasta:</b> {_html.escape(str(fila.get('fecha_fin') or '-'))}</li>"
+                f"<li><b>Ref. Estación:</b> {_html.escape(str(fila.get('referencia_estacion') or ''))} | <b>Supervisor:</b> {_html.escape(str(fila.get('supervisor') or ''))}</li>"
+                f"<li><b>Observaciones:</b> {_html.escape(str(fila.get('observaciones') or '-'))}</li>"
                 f"</ul>"
             )
             ok, msg = MailService.crear_borrador_outlook(
@@ -575,4 +603,6 @@ class NovedadesView(QWidget):
             QMessageBox.critical(self, "Error", f"No se pudo preparar el correo:\n{e}")
 
     def _on_double_click(self, index) -> None:
+        if not (self.tiene_permiso("novedades.editar") or self.tiene_permiso("registros.modificar")):
+            return
         self._modificar_novedad()

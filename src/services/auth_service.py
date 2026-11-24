@@ -20,6 +20,19 @@ logger = get_logger("AuthService")
 
 MAX_INTENTOS_FALLIDOS = 5
 BLOQUEO_SEGUNDOS = 30
+PASSWORD_MIN_LENGTH = 8
+PASSWORD_MAX_BYTES = 72
+_DUMMY_BCRYPT_HASH = bcrypt.hashpw(b"reno_dummy_timing_pad", bcrypt.gensalt())
+
+
+def validar_politica_password(password: str) -> None:
+    """Valida requisitos mínimos de seguridad y límite de bytes de bcrypt."""
+    if not password:
+        raise ValueError("La contraseña no puede estar vacía.")
+    if len(password) < PASSWORD_MIN_LENGTH:
+        raise ValueError(f"La contraseña debe tener al menos {PASSWORD_MIN_LENGTH} caracteres.")
+    if len(password.encode("utf-8")) > PASSWORD_MAX_BYTES:
+        raise ValueError(f"La contraseña no puede superar los {PASSWORD_MAX_BYTES} bytes.")
 
 
 class CuentaBloqueadaError(Exception):
@@ -40,6 +53,21 @@ class AuthService:
         self.db = db
         self._intentos_fallidos: Dict[str, Dict[str, Any]] = {}
 
+    @staticmethod
+    def _encolar_usuario_sync(conn, user_id: int, now_ts: str) -> None:
+        """Encola una actualización de usuario en sync_outbox."""
+        user_row = conn.execute("SELECT * FROM usuarios WHERE id=?", (int(user_id),)).fetchone()
+        if user_row:
+            payload = json.dumps(dict(user_row), ensure_ascii=False)
+            conn.execute(
+                """INSERT INTO sync_outbox(tabla, registro_pk, operacion, payload_json, creado_en, intentos)
+                   VALUES ('usuarios', ?, 'UPSERT', ?, ?, 0)
+                   ON CONFLICT(tabla, registro_pk) DO UPDATE SET
+                       operacion='UPSERT', payload_json=excluded.payload_json,
+                       creado_en=excluded.creado_en, intentos=0, ultimo_error=NULL""",
+                (str(user_row["username"]), payload, now_ts),
+            )
+
     def crear_usuario(
         self,
         username: str,
@@ -48,16 +76,16 @@ class AuthService:
         legajo: Optional[int] = None,
         roles: Tuple[str, ...] = (),
     ) -> int:
-        if not password:
-            raise ValueError("La contraseña no puede estar vacía.")
+        validar_politica_password(password)
         if legajo is None:
             raise ValueError("El legajo es obligatorio para nuevos usuarios.")
         password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        now_ts = self.db.now()
         with self.db.write_transaction() as conn:
             cur = conn.execute(
-                """INSERT INTO usuarios(username, nombre, legajo, password_hash, creado_en, password_cambiado_en)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (username.strip(), nombre.strip(), legajo, password_hash, self.db.now(), self.db.now()),
+                """INSERT INTO usuarios(username, nombre, legajo, password_hash, creado_en, password_cambiado_en, sync_status, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)""",
+                (username.strip(), nombre.strip(), legajo, password_hash, now_ts, now_ts, now_ts),
             )
             user_id = cur.lastrowid
             for role in roles:
@@ -67,6 +95,7 @@ class AuthService:
                     "INSERT OR IGNORE INTO usuario_roles(usuario_id, rol_id) VALUES (?, ?)",
                     (user_id, role_id),
                 )
+            self._encolar_usuario_sync(conn, user_id, now_ts)
             return user_id
 
     def autenticar(self, username: str, password: str) -> Optional[Dict[str, Any]]:
@@ -85,7 +114,15 @@ class AuthService:
                 (username.strip(),),
             ).fetchone()
 
-        if not user or not bcrypt.checkpw(password.encode("utf-8"), user["password_hash"].encode("utf-8")):
+        pwd_bytes = (password or "").encode("utf-8")[:PASSWORD_MAX_BYTES]
+        if not user:
+            # Ejecutar checkpw dummy para mitigar enumeración de usuarios por timing
+            bcrypt.checkpw(pwd_bytes, _DUMMY_BCRYPT_HASH)
+            valido = False
+        else:
+            valido = bcrypt.checkpw(pwd_bytes, user["password_hash"].encode("utf-8"))
+
+        if not valido:
             intentos = self._intentos_fallidos.get(clave, {"count": 0})
             intentos["count"] += 1
             if intentos["count"] >= MAX_INTENTOS_FALLIDOS:
@@ -222,7 +259,14 @@ class AuthService:
         with self.db.write_transaction() as conn:
             return conn.execute("INSERT INTO roles(nombre) VALUES (?)", (nombre.strip(),)).lastrowid
 
-    def establecer_permisos_rol(self, role_id: int, permissions: List[str]) -> None:
+    def establecer_permisos_rol(
+        self,
+        role_id: int,
+        permissions: List[str],
+        actor_user_id: Optional[int] = None,
+    ) -> None:
+        if actor_user_id is not None and not self.tiene_permiso(actor_user_id, "roles.administrar"):
+            raise PermissionError("No tiene permiso 'roles.administrar' para modificar permisos de roles.")
         with self.db.write_transaction() as conn:
             permission_ids = []
             for permission in permissions:
@@ -243,7 +287,15 @@ class AuthService:
                    WHERE rp.rol_id=? ORDER BY p.codigo""", (role_id,)
             ).fetchall()]
 
-    def establecer_roles_usuario(self, user_id: int, roles: List[str]) -> None:
+    def establecer_roles_usuario(
+        self,
+        user_id: int,
+        roles: List[str],
+        actor_user_id: Optional[int] = None,
+    ) -> None:
+        if actor_user_id is not None and not self.tiene_permiso(actor_user_id, "usuarios.administrar"):
+            raise PermissionError("No tiene permiso 'usuarios.administrar' para asignar roles.")
+        now_ts = self.db.now()
         with self.db.write_transaction() as conn:
             conn.execute("DELETE FROM usuario_roles WHERE usuario_id=?", (user_id,))
             for role in roles:
@@ -253,6 +305,11 @@ class AuthService:
                     "INSERT INTO usuario_roles(usuario_id, rol_id) VALUES (?, ?)",
                     (user_id, role_id),
                 )
+            conn.execute(
+                "UPDATE usuarios SET sync_status='pending', updated_at=? WHERE id=?",
+                (now_ts, int(user_id)),
+            )
+            self._encolar_usuario_sync(conn, user_id, now_ts)
 
     def roles_de_usuario(self, user_id: int) -> List[str]:
         with self.db.read_connection() as conn:
@@ -262,12 +319,16 @@ class AuthService:
             ).fetchall()]
 
     def cambiar_estado_usuario(self, user_id: int) -> None:
+        now_ts = self.db.now()
         with self.db.write_transaction() as conn:
-            conn.execute("UPDATE usuarios SET activo=1-activo WHERE id=?", (user_id,))
+            conn.execute(
+                "UPDATE usuarios SET activo=1-activo, sync_status='pending', updated_at=? WHERE id=?",
+                (now_ts, int(user_id)),
+            )
+            self._encolar_usuario_sync(conn, user_id, now_ts)
 
     def cambiar_password(self, user_id: int, password: str) -> None:
-        if not password:
-            raise ValueError("La contraseña no puede estar vacía.")
+        validar_politica_password(password)
         password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
         now_ts = self.db.now()
         with self.db.write_transaction() as conn:
@@ -278,17 +339,7 @@ class AuthService:
                    WHERE id=?""",
                 (password_hash, now_ts, now_ts, int(user_id)),
             )
-            user_row = conn.execute("SELECT * FROM usuarios WHERE id=?", (int(user_id),)).fetchone()
-            if user_row:
-                payload = json.dumps(dict(user_row), ensure_ascii=False)
-                conn.execute(
-                    """INSERT INTO sync_outbox(tabla, registro_pk, operacion, payload_json, creado_en, intentos)
-                       VALUES ('usuarios', ?, 'UPSERT', ?, ?, 0)
-                       ON CONFLICT(tabla, registro_pk) DO UPDATE SET
-                           operacion='UPSERT', payload_json=excluded.payload_json,
-                           creado_en=excluded.creado_en, intentos=0, ultimo_error=NULL""",
-                    (str(user_row["username"]), payload, now_ts),
-                )
+            self._encolar_usuario_sync(conn, user_id, now_ts)
 
     def resetear_password(
         self,
@@ -312,15 +363,19 @@ class AuthService:
             raise RuntimeError("No se pudo armar el correo electrónico para ese usuario.")
         temporal = secrets.token_urlsafe(9)
 
-        if send_fn is not None:
-            send_fn(email, temporal)
+        prev_hash = user["password_hash"]
+        prev_cambiado = user["password_cambiado_en"]
+        prev_debe = user["debe_cambiar_clave"]
 
         password_hash = bcrypt.hashpw(temporal.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
         now = self.db.now()
         with self.db.write_transaction() as conn:
             conn.execute(
-                "UPDATE usuarios SET password_hash=?, password_cambiado_en=?, debe_cambiar_clave=1 WHERE id=?",
-                (password_hash, now, user["id"]),
+                """UPDATE usuarios
+                   SET password_hash=?, password_cambiado_en=?, debe_cambiar_clave=1,
+                       sync_status='pending', updated_at=?
+                   WHERE id=?""",
+                (password_hash, now, now, user["id"]),
             )
             conn.execute(
                 """INSERT INTO auditoria
@@ -334,6 +389,24 @@ class AuthService:
                     now,
                 ),
             )
+            self._encolar_usuario_sync(conn, user["id"], now)
+
+        if send_fn is not None:
+            try:
+                send_fn(email, temporal)
+            except Exception:
+                # Revertir hash si falló el envío del correo para no bloquear la cuenta
+                with self.db.write_transaction() as conn:
+                    conn.execute(
+                        """UPDATE usuarios
+                           SET password_hash=?, password_cambiado_en=?, debe_cambiar_clave=?,
+                               sync_status='pending', updated_at=?
+                           WHERE id=?""",
+                        (prev_hash, prev_cambiado, prev_debe, self.db.now(), user["id"]),
+                    )
+                    self._encolar_usuario_sync(conn, user["id"], self.db.now())
+                raise
+
         return email, temporal
 
     def requiere_cambio_clave(self, user_id: int) -> bool:

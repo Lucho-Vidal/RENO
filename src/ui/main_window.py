@@ -51,19 +51,17 @@ from src.services.records_service import RecordsService
 from src.services.sync_service import MODO_LOCAL, MODO_SHARED_SQLITE, MODO_SUPABASE, SyncService
 from src.services.sync_worker import SyncBackgroundWorker
 from src.services.word_service import WordService
-from src.ui.dialogs.sincronizacion_config_dialog import SincronizacionConfigDialog
 from src.ui.views.administracion_view import AdministracionView
 from src.ui.views.buscador_turnos_view import BuscadorTurnosView
-from src.ui.views.cambios_turno_view import CambiosTurnoView
 from src.ui.views.conocimiento_via_view import ConocimientoViaView
 from src.ui.views.dashboard_view import DashboardView
 from src.ui.views.empleados_view import EmpleadosView
 from src.ui.views.novedades_cambios_view import NovedadesCambiosView
-from src.ui.views.novedades_view import NovedadesView
 from src.ui.views.personal_ciclo_view import PersonalCicloView
 from src.ui.views.turnos_sin_cubrir_view import TurnosSinCubrirView
 from src.ui.views.dialogs.acerca_dialog import AcercaDialog
 from src.ui.views.dialogs.actualizacion_dialog import ActualizacionDialog
+from src.ui.views.dialogs.sincronizacion_config_dialog import SincronizacionConfigDialog
 from src.services.updater_service import (
     InfoActualizacion,
     VerificarActualizacionWorker,
@@ -75,14 +73,10 @@ from src.ui.views.dialogs.admin_dialogs import (
     AdminConfigDialog,
     AdminDestinatariosDialog,
     AdminEliminadosDialog,
-    AdminEmpleadosDialog,
     AdminRolesDialog,
     AdminUsuariosDialog,
 )
 from src.ui.views.dialogs.toast_widget import ToastWidget
-from src.ui.views.novedades_view import NovedadesView
-from src.ui.views.personal_ciclo_view import PersonalCicloView
-from src.ui.workers.task_runner import run_async
 
 logger = get_logger("MainWindow")
 
@@ -324,8 +318,16 @@ class MainWindow(QMainWindow):
                 self.tabs.removeTab(0)
                 if w:
                     w.deleteLater()
-            for attr in ("tab_dashboard", "tab_buscador_turnos", "tab_novedades_cambios",
-                         "tab_turnos_sin_cubrir", "tab_empleados", "tab_ciclo", "tab_administracion"):
+            for attr in (
+                "tab_dashboard",
+                "tab_buscador_turnos",
+                "tab_novedades_cambios",
+                "tab_turnos_sin_cubrir",
+                "tab_empleados",
+                "tab_ciclo",
+                "tab_conocimiento_via",
+                "tab_administracion",
+            ):
                 if hasattr(self, attr):
                     delattr(self, attr)
         else:
@@ -410,6 +412,7 @@ class MainWindow(QMainWindow):
                 self.records_service,
                 self.excel_service,
                 usuario_actual=self.usuario_actual,
+                tiene_permiso_fn=self._tiene_permiso,
                 parent=self,
             )
             self.tabs.addTab(self.tab_empleados, "👷 Empleados (BASE)")
@@ -494,15 +497,20 @@ class MainWindow(QMainWindow):
         self.lbl_db.setStyleSheet("color: #6B7280; padding: 0 8px;")
         self.status_bar.addWidget(self.lbl_db)
 
-        # Indicador de sincronización multimodo (clicable para configurar)
+        # Indicador de sincronización multimodo (clicable solo con permiso sesion.configurar)
+        puede_config_sync = self._tiene_permiso("sesion.configurar")
         self.btn_sync_status = QPushButton("🏠 Modo Local")
         self.btn_sync_status.setFixedHeight(22)
-        self.btn_sync_status.setCursor(Qt.PointingHandCursor)
-        self.btn_sync_status.setToolTip("Clic para configurar modo de sincronización (Local / Red Compartida / Supabase)")
         self.btn_sync_status.setStyleSheet(
             "padding: 2px 10px; font-weight: bold; border-radius: 4px; border: 1px solid #D1D5DB; background-color: #E5E7EB; color: #374151;"
         )
-        self.btn_sync_status.clicked.connect(self._abrir_config_sincronizacion)
+        if puede_config_sync:
+            self.btn_sync_status.setCursor(Qt.PointingHandCursor)
+            self.btn_sync_status.setToolTip("Clic para configurar modo de sincronización (Local / Red Compartida / Supabase)")
+            self.btn_sync_status.clicked.connect(self._abrir_config_sincronizacion)
+        else:
+            self.btn_sync_status.setEnabled(False)
+            self.btn_sync_status.setToolTip("Estado de sincronización del sistema")
         self.status_bar.addPermanentWidget(self.btn_sync_status)
 
         # Botón sincronizar ahora
@@ -973,6 +981,13 @@ class MainWindow(QMainWindow):
             self._on_sync_status_updated(estado)
 
     def _abrir_config_sincronizacion(self) -> None:
+        if not self._tiene_permiso("sesion.configurar"):
+            QMessageBox.warning(
+                self,
+                "Acceso denegado",
+                "No tiene permisos para modificar la configuración de sincronización.",
+            )
+            return
         dlg = SincronizacionConfigDialog(
             sync_service=self.sync_service,
             on_trigger_sync=self.sincronizar_ahora,
@@ -1057,6 +1072,13 @@ class MainWindow(QMainWindow):
 
     def _abrir_config_sistema_dialog(self) -> None:
         """Abre la configuración del sistema y sincroniza la pestaña Administración al guardar."""
+        if not self._tiene_permiso("sesion.configurar"):
+            QMessageBox.warning(
+                self,
+                "Acceso denegado",
+                "No tiene permisos para acceder a la configuración del sistema.",
+            )
+            return
         dlg = AdminConfigDialog(
             self.db,
             records_service=self.records_service,
@@ -1181,6 +1203,15 @@ class MainWindow(QMainWindow):
             self._worker_manual_updater = None
         self._worker_manual_updater = VerificarActualizacionWorker(config=cfg, parent=self)
 
+        def _parent_seguro():
+            try:
+                import shiboken6
+                if parent_dialog is not None and shiboken6.isValid(parent_dialog):
+                    return parent_dialog
+            except Exception:
+                pass
+            return self
+
         def _on_disponible(info: InfoActualizacion, es_obligatoria: bool):
             if getattr(self, "_cerrando", False):
                 return
@@ -1189,8 +1220,9 @@ class MainWindow(QMainWindow):
             self.btn_actualizar.setText(f"🚀 ¡Actualizar a v{info.version}!")
             self.btn_actualizar.setVisible(True)
 
-            if parent_dialog and hasattr(parent_dialog, "accept"):
-                parent_dialog.accept()
+            p_dlg = _parent_seguro()
+            if p_dlg is not self and hasattr(p_dlg, "accept"):
+                p_dlg.accept()
 
             dlg = ActualizacionDialog(info, es_obligatoria=es_obligatoria, parent=self, config=cfg)
             dlg.exec()
@@ -1199,7 +1231,7 @@ class MainWindow(QMainWindow):
             if getattr(self, "_cerrando", False):
                 return
             QMessageBox.information(
-                parent_dialog or self,
+                _parent_seguro(),
                 "Sistema al Día",
                 f"¡Tenés instalada la última versión disponible de RENO (v{APP_VERSION})!\n\nNo se requieren actualizaciones en este momento.",
             )
@@ -1208,7 +1240,7 @@ class MainWindow(QMainWindow):
             if getattr(self, "_cerrando", False):
                 return
             QMessageBox.warning(
-                parent_dialog or self,
+                _parent_seguro(),
                 "Buscar Actualizaciones",
                 f"No se pudo consultar el servidor de actualizaciones:\n\n{err}\n\nVerifique la conexión de red o la configuración de proxy.",
             )
@@ -1221,6 +1253,7 @@ class MainWindow(QMainWindow):
 
     def _cambiar_usuario(self) -> None:
         """Permite iniciar sesión con otro usuario sin reiniciar la aplicación."""
+        import html as _html
         from src.ui.views.dialogs.login_dialog import LoginDialog
 
         login_dlg = LoginDialog(self.auth_service, parent=self)
@@ -1234,7 +1267,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(
                     self,
                     "Sesión Iniciada",
-                    f"Ha iniciado sesión como <b>{nuevo_user.get('username')}</b>.",
+                    f"Ha iniciado sesión como <b>{_html.escape(str(nuevo_user.get('username') or ''))}</b>.",
                 )
 
     def _mostrar_empleados(self) -> None:
@@ -1254,11 +1287,6 @@ class MainWindow(QMainWindow):
                 if actualizado:
                     self.usuario_actual = actualizado
             self.sincronizar_ahora()
-
-    def _abrir_buscador_tren(self) -> None:
-        from src.ui.views.dialogs.buscador_tren_dialog import BuscadorTrenDialog
-        dlg = BuscadorTrenDialog(self.records_service, self.excel_service, parent=self)
-        dlg.exec()
 
     def closeEvent(self, event) -> None:
         self._cerrando = True

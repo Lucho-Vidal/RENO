@@ -28,7 +28,7 @@ class MultiFilterProxyModel(QSortFilterProxyModel):
         self.setDynamicSortFilter(True)
 
     def _refrescar_filtro(self) -> None:
-        self.invalidate()
+        self.invalidateFilter()
 
     def set_global_search(self, text: str) -> None:
         self._global_search_text = (text or "").strip().lower()

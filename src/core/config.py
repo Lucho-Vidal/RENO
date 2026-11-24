@@ -321,10 +321,12 @@ def cargar_configuracion_app() -> dict[str, Any]:
 
 def guardar_configuracion_app(config: dict[str, Any]) -> bool:
     """Guarda la configuración en reno_config.json (con respaldo en perfil de usuario si aplica)."""
+    # Nunca persistir claves privilegiadas service_role en el archivo local del cliente
+    config_segura = {k: v for k, v in config.items() if k != "supabase_service_role_key"}
     try:
         CONFIG_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(CONFIG_JSON_PATH, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
+            json.dump(config_segura, f, indent=2, ensure_ascii=False)
         if CONFIG_JSON_PATH == _DEFAULT_CONFIG_JSON_PATH:
             usr_cfg = _ruta_config_usuario_fallback()
             if usr_cfg and usr_cfg.exists():
@@ -340,7 +342,7 @@ def guardar_configuracion_app(config: dict[str, Any]) -> bool:
                 try:
                     usr_cfg.parent.mkdir(parents=True, exist_ok=True)
                     with open(usr_cfg, "w", encoding="utf-8") as f:
-                        json.dump(config, f, indent=2, ensure_ascii=False)
+                        json.dump(config_segura, f, indent=2, ensure_ascii=False)
                     return True
                 except Exception:
                     return False

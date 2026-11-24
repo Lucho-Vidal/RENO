@@ -57,7 +57,13 @@ class OrdenamientosView(QWidget):
         self.pdf_service = pdf_service
         self.mail_service = MailService()
         self.usuario_actual = usuario_actual or {}
-        self.tiene_permiso = tiene_permiso_fn or (lambda p: True)
+        self.tiene_permiso = tiene_permiso_fn or (lambda _p: False)
+
+        from PySide6.QtCore import QTimer
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(250)
+        self._search_timer.timeout.connect(self.recargar_datos)
 
         self._init_ui()
         self.recargar_datos()
@@ -78,11 +84,17 @@ class OrdenamientosView(QWidget):
 
         self.btn_editar = QPushButton("✏️ Modificar")
         self.btn_editar.setObjectName("btnSecondary")
+        self.btn_editar.setEnabled(
+            self.tiene_permiso("ordenamientos.editar") or self.tiene_permiso("registros.modificar")
+        )
         self.btn_editar.clicked.connect(self._modificar_ordenamiento)
         toolbar.addWidget(self.btn_editar)
 
         self.btn_eliminar = QPushButton("🗑️ Eliminar")
         self.btn_eliminar.setObjectName("btnDanger")
+        self.btn_eliminar.setEnabled(
+            self.tiene_permiso("ordenamientos.eliminar") or self.tiene_permiso("registros.modificar")
+        )
         self.btn_eliminar.clicked.connect(self._eliminar_ordenamiento)
         toolbar.addWidget(self.btn_eliminar)
 
@@ -107,6 +119,9 @@ class OrdenamientosView(QWidget):
 
         self.btn_paradas = QPushButton("🚉 Paradas por Tren (CRUD / Excel)")
         self.btn_paradas.setObjectName("btnSecondary")
+        self.btn_paradas.setEnabled(
+            self.tiene_permiso("turnos.administrar") or self.tiene_permiso("turnos.editar")
+        )
         self.btn_paradas.clicked.connect(self._abrir_crud_paradas)
         toolbar.addWidget(self.btn_paradas)
 
@@ -123,7 +138,7 @@ class OrdenamientosView(QWidget):
         self.txt_search = QLineEdit()
         self.txt_search.setPlaceholderText("N° orden, legajo, nombre, tren, turno, motivo...")
         self.txt_search.setFixedWidth(260)
-        self.txt_search.textChanged.connect(self.recargar_datos)
+        self.txt_search.textChanged.connect(lambda _t: self._search_timer.start())
         filter_lay.addWidget(self.txt_search)
 
         filter_lay.addWidget(QLabel("Dotación:"))
@@ -255,6 +270,9 @@ class OrdenamientosView(QWidget):
         return self.table_model.get_row(source_idx.row())
 
     def _nuevo_ordenamiento(self) -> None:
+        if not (self.tiene_permiso("ordenamientos.crear") or self.tiene_permiso("novedades.crear")):
+            QMessageBox.warning(self, "Acceso denegado", "No tiene permisos para crear ordenamientos.")
+            return
         dlg = OrdenamientoDialog(
             self.records_service,
             pdf_service=self.pdf_service,
@@ -266,6 +284,11 @@ class OrdenamientosView(QWidget):
             self.registro_modificado.emit()
 
     def _modificar_ordenamiento(self) -> None:
+        puede_modificar_libre = self.tiene_permiso("registros.modificar")
+        if not (puede_modificar_libre or self.tiene_permiso("ordenamientos.editar")):
+            QMessageBox.warning(self, "Acceso denegado", "No tiene permisos para modificar ordenamientos.")
+            return
+
         fila = self._obtener_seleccionado()
         if not fila:
             QMessageBox.information(self, "Modificar", "Seleccione un ordenamiento en la tabla.")
@@ -275,7 +298,6 @@ class OrdenamientosView(QWidget):
         if not completo:
             return
 
-        puede_modificar_libre = self.tiene_permiso("registros.modificar")
         ref_time = completo.get("created_at") or f"{completo.get('fecha_emision')} {completo.get('hora_emision')}"
         dentro_ventana = self.records_service.dentro_de_ventana(ref_time, "editar_horas")
 
@@ -299,12 +321,16 @@ class OrdenamientosView(QWidget):
             self.registro_modificado.emit()
 
     def _eliminar_ordenamiento(self) -> None:
+        puede_eliminar_libre = self.tiene_permiso("registros.modificar")
+        if not (puede_eliminar_libre or self.tiene_permiso("ordenamientos.eliminar")):
+            QMessageBox.warning(self, "Acceso denegado", "No tiene permisos para eliminar ordenamientos.")
+            return
+
         fila = self._obtener_seleccionado()
         if not fila:
             QMessageBox.information(self, "Eliminar", "Seleccione un ordenamiento en la tabla.")
             return
 
-        puede_eliminar_libre = self.tiene_permiso("registros.modificar")
         ref_time = fila.get("created_at") or f"{fila.get('fecha_emision')} {fila.get('hora_emision')}"
         dentro_ventana = self.records_service.dentro_de_ventana(ref_time, "eliminar_horas")
 
@@ -393,14 +419,15 @@ class OrdenamientosView(QWidget):
                 f"Orden de Servicio {completo.get('nro_orden')} - "
                 f"{completo.get('nombre_personal')} (Leg. {completo.get('legajo_personal')})"
             )
+            import html as _html
             cuerpo = (
-                f"<p>Se adjunta Orden de Servicio N° <b>{completo.get('nro_orden')}</b> emitida el "
-                f"{completo.get('fecha_emision')} a las {completo.get('hora_emision')} hs.</p>"
+                f"<p>Se adjunta Orden de Servicio N° <b>{_html.escape(str(completo.get('nro_orden') or ''))}</b> emitida el "
+                f"{_html.escape(str(completo.get('fecha_emision') or ''))} a las {_html.escape(str(completo.get('hora_emision') or ''))} hs.</p>"
                 f"<ul>"
-                f"<li><b>Agente:</b> {completo.get('nombre_personal')} (Leg. {completo.get('legajo_personal')})</li>"
-                f"<li><b>Dotación:</b> {completo.get('deposito')} | <b>Turno/Ciclo:</b> {completo.get('ciclo_o_turno')}</li>"
-                f"<li><b>Motivo:</b> {completo.get('motivo_orden')}</li>"
-                f"<li><b>REF de {completo.get('deposito')}:</b> {completo.get('ref_pct')} | <b>Emisor:</b> {completo.get('emisor')}</li>"
+                f"<li><b>Agente:</b> {_html.escape(str(completo.get('nombre_personal') or ''))} (Leg. {_html.escape(str(completo.get('legajo_personal') or ''))})</li>"
+                f"<li><b>Dotación:</b> {_html.escape(str(completo.get('deposito') or ''))} | <b>Turno/Ciclo:</b> {_html.escape(str(completo.get('ciclo_o_turno') or ''))}</li>"
+                f"<li><b>Motivo:</b> {_html.escape(str(completo.get('motivo_orden') or ''))}</li>"
+                f"<li><b>REF de {_html.escape(str(completo.get('deposito') or ''))}:</b> {_html.escape(str(completo.get('ref_pct') or ''))} | <b>Emisor:</b> {_html.escape(str(completo.get('emisor') or ''))}</li>"
                 f"</ul>"
             )
             ok, msg = self.mail_service.crear_borrador_outlook(
@@ -432,6 +459,9 @@ class OrdenamientosView(QWidget):
             QMessageBox.critical(self, "Error", f"No se pudo exportar a Excel:\n{e}")
 
     def _abrir_crud_paradas(self) -> None:
+        if not (self.tiene_permiso("turnos.administrar") or self.tiene_permiso("turnos.editar")):
+            QMessageBox.warning(self, "Acceso denegado", "No tiene permisos para administrar paradas por tren.")
+            return
         dlg = AdminTrenParadasDialog(
             self.records_service,
             usuario_actual=self.usuario_actual,

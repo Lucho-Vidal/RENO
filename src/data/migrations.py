@@ -266,6 +266,9 @@ def init_database_schema(db: DatabaseManager) -> None:
             CREATE INDEX IF NOT EXISTS idx_cambios_legajo_1 ON cambios_turno(legajo_1);
             CREATE INDEX IF NOT EXISTS idx_cambios_legajo_2 ON cambios_turno(legajo_2);
             CREATE INDEX IF NOT EXISTS idx_cambios_registrado ON cambios_turno(registrado_en DESC);
+            CREATE INDEX IF NOT EXISTS idx_novedades_activo_fechas ON novedades(activo, fecha_inicio, fecha_fin);
+            CREATE INDEX IF NOT EXISTS idx_cambios_activo_fecha ON cambios_turno(activo, fecha_cambio);
+            CREATE INDEX IF NOT EXISTS idx_empleados_dot_esp ON empleados(dotacion, especialidad);
             CREATE INDEX IF NOT EXISTS idx_sync_outbox_tabla ON sync_outbox(tabla);
 
             -- Base documental de Itinerarios de Conducción Eléctrica

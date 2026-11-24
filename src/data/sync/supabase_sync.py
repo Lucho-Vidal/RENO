@@ -2,25 +2,16 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
-import os
 import re
-import sys
 import threading
-import urllib.error
 import urllib.parse
-import urllib.request
 from datetime import datetime
 from typing import Any
 
-from ...core.config import cargar_configuracion_app
-from ...core.proxy import (
-    OfflineError,
-    ProxyAuthError,
-    ejecutar_request_supabase,
-)
+from ...core.config import cargar_configuracion_app, sanitizar_url_supabase
+from ...core.proxy import ejecutar_request_supabase
 from ..database import DatabaseManager
 from .outbox_queue import OutboxQueue
 
@@ -61,19 +52,7 @@ def normalizar_valor_timestamp(valor: Any) -> str | None:
     return s
 
 
-def sanitizar_supabase_url(url: str | None) -> str:
-    if not url:
-        return ""
-    u = str(url).strip().rstrip("/")
-    m = re.search(r"supabase\.com/dashboard/project/([a-zA-Z0-9_\-]+)", u, re.IGNORECASE)
-    if m:
-        return f"https://{m.group(1)}.supabase.co"
-    u = re.sub(r"/(rest|api)/v\d+.*$", "", u, flags=re.IGNORECASE).rstrip("/")
-    if u.startswith("http://"):
-        u = "https://" + u[len("http://"):]
-    elif not u.startswith("https://"):
-        u = "https://" + u
-    return u.rstrip("/")
+sanitizar_supabase_url = sanitizar_url_supabase
 
 
 def ejecutar_request_http(
@@ -243,7 +222,16 @@ class SupabaseSyncEngine:
                     for item in items_de_tabla:
                         # 1. Operación DELETE
                         if item.operacion == "DELETE":
-                            endpoint_del = f"{url_base}/rest/v1/{tabla_remota}?{pk_col}=eq.{urllib.parse.quote(str(item.registro_pk))}"
+                            if "," in pk_col and "_" in str(item.registro_pk):
+                                pk_cols = [c.strip() for c in pk_col.split(",")]
+                                pk_vals = str(item.registro_pk).split("_", len(pk_cols) - 1)
+                                filtro_del = "&".join(
+                                    f"{c}=eq.{urllib.parse.quote(str(v), safe='')}"
+                                    for c, v in zip(pk_cols, pk_vals)
+                                )
+                            else:
+                                filtro_del = f"{pk_col}=eq.{urllib.parse.quote(str(item.registro_pk), safe='')}"
+                            endpoint_del = f"{url_base}/rest/v1/{tabla_remota}?{filtro_del}"
                             try:
                                 status_del, body_del, _ = ejecutar_request_http(
                                     config=cfg,
@@ -409,9 +397,19 @@ class SupabaseSyncEngine:
                             for tab, r_pk in registros_sincronizados:
                                 rem_info = pks_map.get(tab)
                                 if rem_info:
-                                    pk_f = rem_info[1].split(",")[0].strip()
+                                    pk_spec = rem_info[1]
                                     try:
-                                        conn.execute(f"UPDATE {tab} SET sync_status = 'synced' WHERE {pk_f} = ?;", (r_pk,))
+                                        if "," in pk_spec and "_" in str(r_pk):
+                                            pk_cols = [c.strip() for c in pk_spec.split(",")]
+                                            pk_vals = str(r_pk).split("_", len(pk_cols) - 1)
+                                            where_sql = " AND ".join(f"{c} = ?" for c in pk_cols)
+                                            conn.execute(
+                                                f"UPDATE {tab} SET sync_status = 'synced' WHERE {where_sql};",
+                                                tuple(pk_vals),
+                                            )
+                                        else:
+                                            pk_f = pk_spec.strip()
+                                            conn.execute(f"UPDATE {tab} SET sync_status = 'synced' WHERE {pk_f} = ?;", (r_pk,))
                                     except Exception:
                                         pass
                     except Exception as ex_sync_local:
@@ -445,9 +443,19 @@ class SupabaseSyncEngine:
                         )
                         if 200 <= status < 300:
                             remotos = json.loads(body.decode("utf-8")) if body else []
+                            if not remotos:
+                                continue
+                            cols_locales = [
+                                row["name"]
+                                for row in conn.execute(f"PRAGMA table_info({local});").fetchall()
+                            ]
+                            cols_set = set(cols_locales)
+                            pk_cols = [c.strip() for c in pk_fld.split(",")]
+                            ahora_iso = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
                             for r in remotos:
                                 recibidos += 1
-                                # Anti-colisión en novedades y cambios por ID
+                                # Anti-colisión en novedades por ID
                                 if local == "novedades":
                                     row_loc = conn.execute(
                                         "SELECT legajo, fecha_inicio, sync_status FROM novedades WHERE id = ?;",
@@ -475,9 +483,47 @@ class SupabaseSyncEngine:
                                             r.get("franco", ""), r["novedad"], r["fecha_inicio"], r.get("fecha_fin"),
                                             r.get("referencia_estacion", ""), r.get("supervisor", ""), r.get("observaciones"),
                                             r.get("usuario_windows"), r.get("usuario_id"), 1 if r.get("activo", True) else 0,
-                                            r.get("updated_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                            r.get("updated_at") or ahora_iso,
                                         ),
                                     )
+                                    continue
+
+                                # Upsert genérico para las demás 9 tablas sincronizables
+                                if not all(r.get(c) is not None for c in pk_cols):
+                                    continue
+                                if "sync_status" in cols_set:
+                                    where_pk = " AND ".join(f"{c} = ?" for c in pk_cols)
+                                    vals_pk = tuple(r[c] for c in pk_cols)
+                                    existente = conn.execute(
+                                        f"SELECT sync_status FROM {local} WHERE {where_pk} LIMIT 1;",
+                                        vals_pk,
+                                    ).fetchone()
+                                    if existente and existente["sync_status"] == "pending":
+                                        # Respetar cambios locales pendientes de subir
+                                        continue
+
+                                fila_limpia: dict[str, Any] = {}
+                                for col in cols_locales:
+                                    if col == "sync_status":
+                                        fila_limpia[col] = "synced"
+                                    elif col == "updated_at":
+                                        fila_limpia[col] = r.get("updated_at") or ahora_iso
+                                    elif col == "actualizado_en":
+                                        fila_limpia[col] = r.get("actualizado_en") or r.get("updated_at") or ahora_iso
+                                    elif col in r:
+                                        val = r[col]
+                                        if isinstance(val, bool):
+                                            val = 1 if val else 0
+                                        fila_limpia[col] = val
+
+                                if not fila_limpia:
+                                    continue
+                                cols_ins = list(fila_limpia.keys())
+                                ph = ", ".join("?" for _ in cols_ins)
+                                conn.execute(
+                                    f"INSERT OR REPLACE INTO {local} ({', '.join(cols_ins)}) VALUES ({ph});",
+                                    tuple(fila_limpia[c] for c in cols_ins),
+                                )
                     except Exception as pull_ex:
                         logger.debug("Error en pull de %s: %s", remota, pull_ex)
 

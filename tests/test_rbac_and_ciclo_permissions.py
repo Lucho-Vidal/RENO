@@ -337,6 +337,7 @@ def test_admin_roles_widget_contraste_y_cambio_tema(qapp, tmp_path: Path):
         backup_service=bak_srv,
         excel_service=excel_srv,
         db=db,
+        tiene_permiso_fn=lambda _p: True,
     )
     admin_view.actualizar_tema("oscuro")
     assert "#242436" in admin_view.widget_roles.card_guia.styleSheet()

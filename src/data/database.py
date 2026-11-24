@@ -64,13 +64,23 @@ class DatabaseManager:
     """Conexión y transacciones sobre SQLite con soporte de modos WAL y DELETE."""
 
     def __init__(self, db_path: Path | str, journal_mode: str = "WAL", lock_timeout: int = 15) -> None:
+        raw_str = str(db_path)
+        es_red_unc = raw_str.startswith("\\\\") or raw_str.startswith("//")
         self.db_path = Path(db_path).resolve()
         self.lock_path = Path(f"{self.db_path}.lock")
-        self.journal_mode = journal_mode.upper() if journal_mode else "WAL"
-        self.lock_timeout = lock_timeout
+        modo = journal_mode.upper() if journal_mode else "WAL"
+        if es_red_unc and modo == "WAL":
+            logger.warning(
+                "Ruta de red UNC detectada (%s): forzando journal_mode='DELETE' para evitar corrupción SQLite sobre SMB.",
+                raw_str,
+            )
+            modo = "DELETE"
+        self.journal_mode = modo
+        self.lock_timeout = max(1, int(lock_timeout))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._last_mtime: float = 0.0
         self._last_data_version: int = 0
+        self._journal_configured: bool = False
 
     @staticmethod
     def now() -> str:
@@ -89,20 +99,25 @@ class DatabaseManager:
         conn.execute("PRAGMA foreign_keys = ON;")
         conn.execute("PRAGMA temp_store = MEMORY;")
 
+        if not self._journal_configured:
+            if self.journal_mode == "WAL":
+                try:
+                    conn.execute("PRAGMA journal_mode = WAL;")
+                except Exception:
+                    conn.execute("PRAGMA journal_mode = DELETE;")
+            else:
+                try:
+                    conn.execute("PRAGMA journal_mode = DELETE;")
+                except Exception:
+                    pass
+            self._journal_configured = True
+
         if self.journal_mode == "WAL":
-            try:
-                conn.execute("PRAGMA journal_mode = WAL;")
-            except Exception:
-                conn.execute("PRAGMA journal_mode = DELETE;")
             conn.execute("PRAGMA synchronous = NORMAL;")
             conn.execute("PRAGMA busy_timeout = 5000;")
         else:
-            try:
-                conn.execute("PRAGMA journal_mode = DELETE;")
-            except Exception:
-                pass
             conn.execute("PRAGMA synchronous = FULL;")
-            conn.execute(f"PRAGMA busy_timeout = {self.lock_timeout * 1000};")
+            conn.execute(f"PRAGMA busy_timeout = {int(self.lock_timeout) * 1000};")
 
         return conn
 

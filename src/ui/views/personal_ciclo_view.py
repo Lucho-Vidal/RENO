@@ -214,7 +214,7 @@ class PersonalCicloView(QWidget):
     def _can(self, perm: str) -> bool:
         if self.tiene_permiso_fn:
             return bool(self.tiene_permiso_fn(perm))
-        return True
+        return False
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)

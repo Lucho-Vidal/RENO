@@ -580,6 +580,21 @@ ESTRUCTURA_PERMISOS_PESTANAS: tuple[dict[str, Any], ...] = (
         ],
     },
     {
+        "pestana": "🛤️ Pestaña: Conocimiento de Vía",
+        "icono": "🛤️",
+        "subgrupos": [
+            {
+                "subpestana": "🗺️ Matriz de Conocimiento de Vía",
+                "descripcion": "Visualización, edición y administración de sectores de vía y conocimientos.",
+                "permisos": [
+                    "conocimiento_via.ver",
+                    "conocimiento_via.editar",
+                    "conocimiento_via.administrar",
+                ],
+            },
+        ],
+    },
+    {
         "pestana": "⚙️ Pestaña: Administración",
         "icono": "⚙️",
         "subgrupos": [
@@ -633,6 +648,7 @@ PERMISOS_GRUPOS: tuple[tuple[str, str], ...] = (
     ("cambios_turno", "Cambios de turno"),
     ("ordenamientos", "Ordenamientos operativos"),
     ("reemplazos", "Reemplazos / Ciclo"),
+    ("conocimiento_via", "Conocimiento de Vía"),
     ("empleados", "Empleados"),
     ("personalEstacion", "Personal de estación"),
     ("dotaciones", "Dotaciones"),

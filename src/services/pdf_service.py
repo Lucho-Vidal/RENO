@@ -38,9 +38,15 @@ TEXT_DARK = colors.HexColor("#2C3E50")
 BORDER_COLOR = colors.HexColor("#BDC3C7")
 
 
-class NumberedCanvas:
-    """Canvas de dos pasadas para numeración de páginas 'Página X de Y'."""
-    pass
+def _esc(val: Any, default: str = "") -> str:
+    """Escapa texto para inserción segura en párrafos XML de ReportLab."""
+    raw = default if val is None else str(val)
+    return escape(raw)
+
+
+def _esc_nl(val: Any, default: str = "") -> str:
+    """Escapa texto XML y convierte saltos de línea en <br/>."""
+    return _esc(val, default).replace("\n", "<br/>")
 
 
 class PDFService:
@@ -142,7 +148,7 @@ class PDFService:
         # Cabecera
         story.append(Paragraph("TRENES ARGENTINOS OPERACIONES", estilos["Subtitulo"]))
         story.append(Paragraph("CONSTANCIA DE NOVEDAD OPERATIVA", estilos["Titulo"]))
-        story.append(Paragraph(f"Registro N°: {novedad.get('id', '-')} | Fecha: {novedad.get('registrado_en', '-')}", estilos["Subtitulo"]))
+        story.append(Paragraph(f"Registro N°: {_esc(novedad.get('id', '-'))} | Fecha: {_esc(novedad.get('registrado_en', '-'))}", estilos["Subtitulo"]))
         story.append(Spacer(1, 10))
         story.append(HRFlowable(width="100%", thickness=1.5, color=PRIMARY, spaceBefore=0, spaceAfter=15))
 
@@ -151,33 +157,33 @@ class PDFService:
         datos_titular = [
             [
                 Paragraph("<b>Legajo:</b>", estilos["NormalCustom"]),
-                Paragraph(str(novedad.get("legajo", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(novedad.get("legajo", "-")), estilos["NormalCustom"]),
                 Paragraph("<b>Apellidos y Nombres:</b>", estilos["NormalCustom"]),
-                Paragraph(str(novedad.get("apellidos_nombres", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(novedad.get("apellidos_nombres", "-")), estilos["NormalCustom"]),
             ],
             [
                 Paragraph("<b>Especialidad:</b>", estilos["NormalCustom"]),
-                Paragraph(str(novedad.get("especialidad", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(novedad.get("especialidad", "-")), estilos["NormalCustom"]),
                 Paragraph("<b>Dotación:</b>", estilos["NormalCustom"]),
-                Paragraph(str(novedad.get("dotacion", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(novedad.get("dotacion", "-")), estilos["NormalCustom"]),
             ],
             [
                 Paragraph("<b>Turno Habitual:</b>", estilos["NormalCustom"]),
-                Paragraph(str(novedad.get("turnos", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(novedad.get("turnos", "-")), estilos["NormalCustom"]),
                 Paragraph("<b>Franco:</b>", estilos["NormalCustom"]),
-                Paragraph(str(novedad.get("franco", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(novedad.get("franco", "-")), estilos["NormalCustom"]),
             ],
             [
                 Paragraph("<b>Tipo de Novedad:</b>", estilos["NormalCustom"]),
-                Paragraph(str(novedad.get("novedad", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(novedad.get("novedad", "-")), estilos["NormalCustom"]),
                 Paragraph("<b>Período:</b>", estilos["NormalCustom"]),
-                Paragraph(f"{novedad.get('fecha_inicio', '-')} al {novedad.get('fecha_fin') or 'Abierto'}", estilos["NormalCustom"]),
+                Paragraph(f"{_esc(novedad.get('fecha_inicio', '-'))} al {_esc(novedad.get('fecha_fin') or 'Abierto')}", estilos["NormalCustom"]),
             ],
             [
                 Paragraph("<b>Ref. Estación:</b>", estilos["NormalCustom"]),
-                Paragraph(str(novedad.get("referencia_estacion", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(novedad.get("referencia_estacion", "-")), estilos["NormalCustom"]),
                 Paragraph("<b>Supervisor:</b>", estilos["NormalCustom"]),
-                Paragraph(str(novedad.get("supervisor", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(novedad.get("supervisor", "-")), estilos["NormalCustom"]),
             ],
         ]
         t_titular = Table(datos_titular, colWidths=[3.2 * cm, 5.5 * cm, 3.8 * cm, 5.5 * cm])
@@ -204,11 +210,11 @@ class PDFService:
             filas_tramos = [encabezados]
             for t in tramos:
                 filas_tramos.append([
-                    Paragraph(str(t.get("legajo_reemplazo", "-")), estilos["TablaCellCenter"]),
-                    Paragraph(str(t.get("apellidos_nombres_reemplazo", "-")), estilos["TablaCell"]),
-                    Paragraph(str(t.get("turnos_reemplazo", "-")), estilos["TablaCellCenter"]),
-                    Paragraph(str(t.get("fecha_inicio", "-")), estilos["TablaCellCenter"]),
-                    Paragraph(str(t.get("fecha_fin") or "Abierto"), estilos["TablaCellCenter"]),
+                    Paragraph(_esc(t.get("legajo_reemplazo", "-")), estilos["TablaCellCenter"]),
+                    Paragraph(_esc(t.get("apellidos_nombres_reemplazo", "-")), estilos["TablaCell"]),
+                    Paragraph(_esc(t.get("turnos_reemplazo", "-")), estilos["TablaCellCenter"]),
+                    Paragraph(_esc(t.get("fecha_inicio", "-")), estilos["TablaCellCenter"]),
+                    Paragraph(_esc(t.get("fecha_fin") or "Abierto"), estilos["TablaCellCenter"]),
                 ])
             t_reemplazos = Table(filas_tramos, colWidths=[2.2 * cm, 7.5 * cm, 3.5 * cm, 2.4 * cm, 2.4 * cm])
             t_reemplazos.setStyle(TableStyle([
@@ -226,7 +232,7 @@ class PDFService:
 
         # Observaciones
         story.append(Paragraph("3. OBSERVACIONES", estilos["Seccion"]))
-        obs_text = str(novedad.get("observaciones") or "Sin observaciones registradas.").replace("\n", "<br/>")
+        obs_text = _esc_nl(novedad.get("observaciones") or "Sin observaciones registradas.")
         t_obs = Table([[Paragraph(obs_text, estilos["NormalCustom"])]], colWidths=[18 * cm])
         t_obs.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), BG_LIGHT),
@@ -277,7 +283,7 @@ class PDFService:
         # Cabecera
         story.append(Paragraph("TRENES ARGENTINOS OPERACIONES", estilos["Subtitulo"]))
         story.append(Paragraph("SOLICITUD / CONSTANCIA DE CAMBIO DE TURNO", estilos["Titulo"]))
-        story.append(Paragraph(f"Registro N°: {cambio.get('id', '-')} | Fecha de Registro: {cambio.get('registrado_en', '-')}", estilos["Subtitulo"]))
+        story.append(Paragraph(f"Registro N°: {_esc(cambio.get('id', '-'))} | Fecha de Registro: {_esc(cambio.get('registrado_en', '-'))}", estilos["Subtitulo"]))
         story.append(Spacer(1, 10))
         story.append(HRFlowable(width="100%", thickness=1.5, color=PRIMARY, spaceBefore=0, spaceAfter=15))
 
@@ -286,21 +292,21 @@ class PDFService:
         datos_agente1 = [
             [
                 Paragraph("<b>Legajo:</b>", estilos["NormalCustom"]),
-                Paragraph(str(cambio.get("legajo_1", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(cambio.get("legajo_1", "-")), estilos["NormalCustom"]),
                 Paragraph("<b>Apellidos y Nombres:</b>", estilos["NormalCustom"]),
-                Paragraph(str(cambio.get("apellidos_nombres_1", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(cambio.get("apellidos_nombres_1", "-")), estilos["NormalCustom"]),
             ],
             [
                 Paragraph("<b>Especialidad:</b>", estilos["NormalCustom"]),
-                Paragraph(str(cambio.get("especialidad_1", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(cambio.get("especialidad_1", "-")), estilos["NormalCustom"]),
                 Paragraph("<b>Dotación:</b>", estilos["NormalCustom"]),
-                Paragraph(str(cambio.get("dotacion_1", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(cambio.get("dotacion_1", "-")), estilos["NormalCustom"]),
             ],
             [
                 Paragraph("<b>Turno Original:</b>", estilos["NormalCustom"]),
-                Paragraph(str(cambio.get("turnos_1", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(cambio.get("turnos_1", "-")), estilos["NormalCustom"]),
                 Paragraph("<b>Franco:</b>", estilos["NormalCustom"]),
-                Paragraph(str(cambio.get("franco_1", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(cambio.get("franco_1", "-")), estilos["NormalCustom"]),
             ],
         ]
         t1 = Table(datos_agente1, colWidths=[3.2 * cm, 5.5 * cm, 3.8 * cm, 5.5 * cm])
@@ -319,21 +325,21 @@ class PDFService:
         datos_agente2 = [
             [
                 Paragraph("<b>Legajo:</b>", estilos["NormalCustom"]),
-                Paragraph(str(cambio.get("legajo_2", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(cambio.get("legajo_2", "-")), estilos["NormalCustom"]),
                 Paragraph("<b>Apellidos y Nombres:</b>", estilos["NormalCustom"]),
-                Paragraph(str(cambio.get("apellidos_nombres_2", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(cambio.get("apellidos_nombres_2", "-")), estilos["NormalCustom"]),
             ],
             [
                 Paragraph("<b>Especialidad:</b>", estilos["NormalCustom"]),
-                Paragraph(str(cambio.get("especialidad_2", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(cambio.get("especialidad_2", "-")), estilos["NormalCustom"]),
                 Paragraph("<b>Dotación:</b>", estilos["NormalCustom"]),
-                Paragraph(str(cambio.get("dotacion_2", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(cambio.get("dotacion_2", "-")), estilos["NormalCustom"]),
             ],
             [
                 Paragraph("<b>Turno Original:</b>", estilos["NormalCustom"]),
-                Paragraph(str(cambio.get("turnos_2", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(cambio.get("turnos_2", "-")), estilos["NormalCustom"]),
                 Paragraph("<b>Franco:</b>", estilos["NormalCustom"]),
-                Paragraph(str(cambio.get("franco_2", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(cambio.get("franco_2", "-")), estilos["NormalCustom"]),
             ],
         ]
         t2 = Table(datos_agente2, colWidths=[3.2 * cm, 5.5 * cm, 3.8 * cm, 5.5 * cm])
@@ -352,15 +358,15 @@ class PDFService:
         datos_permuta = [
             [
                 Paragraph("<b>Fecha del Cambio:</b>", estilos["NormalCustom"]),
-                Paragraph(f"<b>{cambio.get('fecha_cambio', '-')}</b>", estilos["NormalCustom"]),
+                Paragraph(f"<b>{_esc(cambio.get('fecha_cambio', '-'))}</b>", estilos["NormalCustom"]),
                 Paragraph("<b>Ref. Estación:</b>", estilos["NormalCustom"]),
-                Paragraph(str(cambio.get("referencia_estacion", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(cambio.get("referencia_estacion", "-")), estilos["NormalCustom"]),
             ],
             [
                 Paragraph("<b>Supervisor:</b>", estilos["NormalCustom"]),
-                Paragraph(str(cambio.get("supervisor", "-")), estilos["NormalCustom"]),
+                Paragraph(_esc(cambio.get("supervisor", "-")), estilos["NormalCustom"]),
                 Paragraph("<b>Observaciones:</b>", estilos["NormalCustom"]),
-                Paragraph(str(cambio.get("observaciones") or "Sin observaciones"), estilos["NormalCustom"]),
+                Paragraph(_esc_nl(cambio.get("observaciones") or "Sin observaciones"), estilos["NormalCustom"]),
             ],
         ]
         t_permuta = Table(datos_permuta, colWidths=[3.2 * cm, 5.5 * cm, 3.8 * cm, 5.5 * cm])
@@ -423,7 +429,11 @@ class PDFService:
 
         # Cabecera
         story.append(Paragraph(f"CRONOGRAMA MENSUAL - PERSONAL DE CICLO: {mes_txt.upper()}", estilos["Titulo"]))
-        sub = f"Agente: <b>{empleado.get('apellidos_nombres')}</b> (Leg. {empleado.get('legajo')}) | Dotación: {empleado.get('dotacion')} | Esp: {empleado.get('especialidad')} | Jornada CCT: {empleado.get('jornada_horas', 6)} hs"
+        sub = (
+            f"Agente: <b>{_esc(empleado.get('apellidos_nombres'))}</b> (Leg. {_esc(empleado.get('legajo'))}) | "
+            f"Dotación: {_esc(empleado.get('dotacion'))} | Esp: {_esc(empleado.get('especialidad'))} | "
+            f"Jornada CCT: {_esc(empleado.get('jornada_horas', 6))} hs"
+        )
         story.append(Paragraph(sub, estilos["Subtitulo"]))
         story.append(Spacer(1, 8))
 
@@ -443,19 +453,19 @@ class PDFService:
         filas = [headers]
 
         for d in dias_mes:
-            estado = d.get("estado", "")
+            estado = _esc(d.get("estado", ""))
             est_style = estilos["TablaCellCenter"]
             filas.append([
-                Paragraph(str(d.get("dia")), estilos["TablaCellCenter"]),
-                Paragraph(str(d.get("fecha")), estilos["TablaCellCenter"]),
-                Paragraph(str(d.get("dia_semana", ""))[:3], estilos["TablaCellCenter"]),
+                Paragraph(_esc(d.get("dia")), estilos["TablaCellCenter"]),
+                Paragraph(_esc(d.get("fecha")), estilos["TablaCellCenter"]),
+                Paragraph(_esc(str(d.get("dia_semana", ""))[:3]), estilos["TablaCellCenter"]),
                 Paragraph(estado, est_style),
-                Paragraph(str(d.get("hora_disponible", "-")), estilos["TablaCellCenter"]),
-                Paragraph(str(d.get("toma", "-")), estilos["TablaCellCenter"]),
-                Paragraph(str(d.get("deja", "-")), estilos["TablaCellCenter"]),
-                Paragraph(str(d.get("horas_trabajadas", "-")), estilos["TablaCellCenter"]),
-                Paragraph(str(d.get("hs_semana", "-")), estilos["TablaCellCenter"]),
-                Paragraph(str(d.get("reemplaza_a") if d.get("reemplaza_a") != "-" else d.get("observaciones", "-")), estilos["TablaCell"]),
+                Paragraph(_esc(d.get("hora_disponible", "-")), estilos["TablaCellCenter"]),
+                Paragraph(_esc(d.get("toma", "-")), estilos["TablaCellCenter"]),
+                Paragraph(_esc(d.get("deja", "-")), estilos["TablaCellCenter"]),
+                Paragraph(_esc(d.get("horas_trabajadas", "-")), estilos["TablaCellCenter"]),
+                Paragraph(_esc(d.get("hs_semana", "-")), estilos["TablaCellCenter"]),
+                Paragraph(_esc(d.get("reemplaza_a") if d.get("reemplaza_a") != "-" else d.get("observaciones", "-")), estilos["TablaCell"]),
             ])
 
         col_w = [1.0 * cm, 1.8 * cm, 1.4 * cm, 2.8 * cm, 1.4 * cm, 1.4 * cm, 1.4 * cm, 1.5 * cm, 1.5 * cm, 4.8 * cm]
@@ -775,8 +785,8 @@ class PDFService:
         ]
         for t, c in por_tipo[:12]:
             filas_tipo.append([
-                Paragraph(str(t), estilos["TablaCell"]),
-                Paragraph(str(c), estilos["TablaCellCenter"]),
+                Paragraph(_esc(t), estilos["TablaCell"]),
+                Paragraph(_esc(c), estilos["TablaCellCenter"]),
                 Paragraph(f"{(c / total_tipo) * 100:.1f}%", estilos["TablaCellCenter"]),
             ])
         t_tipo = Table(filas_tipo, colWidths=[10 * cm, 4 * cm, 4 * cm])
@@ -798,8 +808,8 @@ class PDFService:
         ]
         for d, c in por_dot[:10]:
             filas_dot.append([
-                Paragraph(str(d), estilos["TablaCell"]),
-                Paragraph(str(c), estilos["TablaCellCenter"]),
+                Paragraph(_esc(d), estilos["TablaCell"]),
+                Paragraph(_esc(c), estilos["TablaCellCenter"]),
                 Paragraph(f"{(c / total_dot) * 100:.1f}%", estilos["TablaCellCenter"]),
             ])
         t_dot = Table(filas_dot, colWidths=[10 * cm, 4 * cm, 4 * cm])
@@ -820,8 +830,8 @@ class PDFService:
         ]
         for dia, cant in por_dia:
             filas_dia.append([
-                Paragraph(str(dia), estilos["TablaCell"]),
-                Paragraph(str(cant), estilos["TablaCellCenter"]),
+                Paragraph(_esc(dia), estilos["TablaCell"]),
+                Paragraph(_esc(cant), estilos["TablaCellCenter"]),
             ])
         t_dia = Table(filas_dia, colWidths=[9 * cm, 9 * cm])
         t_dia.setStyle(TableStyle([
@@ -913,10 +923,10 @@ class PDFService:
                 [
                     Paragraph(
                         f"<b>TRENES ARGENTINOS OPERACIONES</b><br/>"
-                        f"<font size=8>Gerencia Operativa Línea Roca - Base {deposito} ({etiqueta_copia})</font>",
+                        f"<font size=8>Gerencia Operativa Línea Roca - Base {_esc(deposito)} ({_esc(etiqueta_copia)})</font>",
                         st_small,
                     ),
-                    Paragraph(f"<b>ORDEN DE SERVICIO</b><br/>N° {nro_orden}", st_header_box),
+                    Paragraph(f"<b>ORDEN DE SERVICIO</b><br/>N° {_esc(nro_orden)}", st_header_box),
                 ]
             ]
             t_cab = Table(cab_data, colWidths=[12.5 * cm, 6.5 * cm])
@@ -934,19 +944,19 @@ class PDFService:
             # 2. Datos del Personal y Referencias Operativas
             meta_data = [
                 [
-                    Paragraph(f"<b>Legajo:</b> {legajo}", st_small),
-                    Paragraph(f"<b>Apellido y Nombre:</b> {nombre}", st_small),
-                    Paragraph(f"<b>Depósito:</b> {deposito}", st_small),
-                    Paragraph(f"<b>Fecha/Hora:</b> {fecha_em} {hora_em}", st_small),
+                    Paragraph(f"<b>Legajo:</b> {_esc(legajo)}", st_small),
+                    Paragraph(f"<b>Apellido y Nombre:</b> {_esc(nombre)}", st_small),
+                    Paragraph(f"<b>Depósito:</b> {_esc(deposito)}", st_small),
+                    Paragraph(f"<b>Fecha/Hora:</b> {_esc(fecha_em)} {_esc(hora_em)}", st_small),
                 ],
                 [
-                    Paragraph(f"<b>Itinerario:</b> {itinerario}", st_small),
-                    Paragraph(f"<b>Turno / Ciclo:</b> {ciclo_turno} ({regimen})", st_small),
-                    Paragraph(f"<b>REF de {deposito}:</b> {ref_pct}", st_small),
-                    Paragraph(f"<b>Emisor:</b> {emisor}", st_small),
+                    Paragraph(f"<b>Itinerario:</b> {_esc(itinerario)}", st_small),
+                    Paragraph(f"<b>Turno / Ciclo:</b> {_esc(ciclo_turno)} ({_esc(regimen)})", st_small),
+                    Paragraph(f"<b>REF de {_esc(deposito)}:</b> {_esc(ref_pct)}", st_small),
+                    Paragraph(f"<b>Emisor:</b> {_esc(emisor)}", st_small),
                 ],
                 [
-                    Paragraph(f"<b>Por orden de / Motivo:</b> {motivo}", st_small_bold),
+                    Paragraph(f"<b>Por orden de / Motivo:</b> {_esc(motivo)}", st_small_bold),
                     "",
                     "",
                     "",
@@ -980,14 +990,14 @@ class PDFService:
             max_filas = 10
             for idx, tr in enumerate(tramos[:max_filas], start=1):
                 filas_t.append([
-                    Paragraph(str(tr.get("nro_secuencia") or idx), estilos["TablaCellCenter"]),
-                    Paragraph(str(tr.get("ref") or ""), estilos["TablaCellCenter"]),
-                    Paragraph(f"<b>{tr.get('nro_tren') or ''}</b>", estilos["TablaCellCenter"]),
-                    Paragraph(str(tr.get("origen") or ""), estilos["TablaCell"]),
-                    Paragraph(str(tr.get("hora_salida") or ""), estilos["TablaCellCenter"]),
-                    Paragraph(str(tr.get("destino") or ""), estilos["TablaCell"]),
-                    Paragraph(str(tr.get("hora_llegada") or ""), estilos["TablaCellCenter"]),
-                    Paragraph(str(tr.get("observaciones") or ""), estilos["TablaCell"]),
+                    Paragraph(_esc(tr.get("nro_secuencia") or idx), estilos["TablaCellCenter"]),
+                    Paragraph(_esc(tr.get("ref") or ""), estilos["TablaCellCenter"]),
+                    Paragraph(f"<b>{_esc(tr.get('nro_tren') or '')}</b>", estilos["TablaCellCenter"]),
+                    Paragraph(_esc(tr.get("origen") or ""), estilos["TablaCell"]),
+                    Paragraph(_esc(tr.get("hora_salida") or ""), estilos["TablaCellCenter"]),
+                    Paragraph(_esc(tr.get("destino") or ""), estilos["TablaCell"]),
+                    Paragraph(_esc(tr.get("hora_llegada") or ""), estilos["TablaCellCenter"]),
+                    Paragraph(_esc(tr.get("observaciones") or ""), estilos["TablaCell"]),
                 ])
 
             # Rellenar filas vacías mínimas para mantener estructura uniforme
@@ -1010,7 +1020,7 @@ class PDFService:
 
             # 4. Pie de página legal y firmas
             if obs_pie:
-                bloques.append(Paragraph(f"<b>Observación:</b> {obs_pie}", st_small))
+                bloques.append(Paragraph(f"<b>Observación:</b> {_esc_nl(obs_pie)}", st_small))
                 bloques.append(Spacer(1, 2))
 
             bloques.append(

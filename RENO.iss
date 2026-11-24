@@ -7,9 +7,6 @@
 #define MyAppPublisher "Trenes Argentinos - luvidev"
 #define MyAppURL "https://luciano-vidal.web.app/"
 #define MyAppExeName "RENO.exe"
-#define MyAppAssocName MyAppName + " File"
-#define MyAppAssocExt ".myp"
-#define MyAppAssocKey StringChange(MyAppAssocName, " ", "") + MyAppAssocExt
 
 [Setup]
 AppId={{F3DAD1DB-89B6-4C1E-BB17-11A2CE031336}
@@ -23,12 +20,9 @@ DefaultDirName={autopf}\{#MyAppName}
 
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-ChangesAssociations=yes
 DisableProgramGroupPage=yes
 
 LicenseFile=LICENSE.txt
-InfoBeforeFile=beforeInstalation.txt
-InfoAfterFile=afterInstalation.txt
 
 ; Instalación sin elevación obligatoria de privilegios (Standard User)
 PrivilegesRequired=lowest
@@ -88,15 +82,6 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 ; Archivos auxiliares opcionales
 Source: "LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "beforeInstalation.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "afterInstalation.txt"; DestDir: "{app}"; Flags: ignoreversion
-
-[Registry]
-Root: HKA; Subkey: "Software\Classes\{#MyAppAssocExt}\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppAssocKey}"; ValueData: ""; Flags: uninsdeletevalue
-Root: HKA; Subkey: "Software\Classes\{#MyAppAssocKey}"; ValueType: string; ValueName: ""; ValueData: "{#MyAppAssocName}"; Flags: uninsdeletekey
-Root: HKA; Subkey: "Software\Classes\{#MyAppAssocKey}\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"
-Root: HKA; Subkey: "Software\Classes\{#MyAppAssocKey}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
-Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExeName}\SupportedTypes"; ValueType: string; ValueName: ".myp"; ValueData: ""
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

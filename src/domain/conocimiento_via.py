@@ -218,6 +218,9 @@ def _construir_catalogo_default() -> CatalogoEstacionesIndex:
     return CatalogoEstacionesIndex(ESTACIONES_BASE)
 
 
+_CACHE_CATALOGO_DEFAULT: Optional[CatalogoEstacionesIndex] = None
+
+
 def resolver_sectores_recorrido(
     origen: str,
     destino: str,
@@ -233,7 +236,12 @@ def resolver_sectores_recorrido(
 
     Retorna lista ordenada de dicts: ``{"sector_id", "codigo", "sentido", "origen_nodo", "destino_nodo"}``.
     """
-    cat = catalogo or _construir_catalogo_default()
+    cat = catalogo
+    if cat is None:
+        global _CACHE_CATALOGO_DEFAULT
+        if _CACHE_CATALOGO_DEFAULT is None:
+            _CACHE_CATALOGO_DEFAULT = _construir_catalogo_default()
+        cat = _CACHE_CATALOGO_DEFAULT
 
     # Construir adyacencia del grafo de sectores activos
     adyacencia: Dict[str, List[Tuple[str, Dict[str, Any], str]]] = {}

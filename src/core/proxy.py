@@ -472,8 +472,6 @@ def _ejecutar_via_powershell(
     proxy_clean = _limpiar_servidor_proxy(proxy_server)
     proxy_url_ps = f"http://{proxy_clean}" if proxy_clean else ""
 
-    cfg_tmp_fd, cfg_tmp_path = tempfile.mkstemp(prefix="reno_ps_cfg_", suffix=".json")
-    os.close(cfg_tmp_fd)
     in_tmp_path = ""
 
     try:
@@ -493,77 +491,91 @@ def _ejecutar_via_powershell(
             "timeout_sec": int(timeout_sec),
             "output_file": output_file or "",
         }
-        Path(cfg_tmp_path).write_text(json.dumps(cfg_payload), encoding="utf-8")
-        cfg_path_b64 = base64.b64encode(cfg_tmp_path.encode("utf-8")).decode("ascii")
 
-        ps_script = f"""
+        ps_script = """
 $ErrorActionPreference = 'Stop'
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13
-$cfgPath = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{cfg_path_b64}'))
-$cfg = Get-Content -LiteralPath $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$cfg = [Console]::In.ReadToEnd() | ConvertFrom-Json
 $handler = New-Object System.Net.Http.HttpClientHandler
 $handler.AllowAutoRedirect = $true
 $handler.UseDefaultCredentials = $true
 $handler.DefaultProxyCredentials = [System.Net.CredentialCache]::DefaultNetworkCredentials
-if ($cfg.proxy_url) {{
+if ($cfg.proxy_url) {
     $p = New-Object System.Net.WebProxy([string]$cfg.proxy_url)
-    if ($cfg.proxy_user) {{
+    if ($cfg.proxy_user) {
         $p.Credentials = New-Object System.Net.NetworkCredential([string]$cfg.proxy_user, [string]$cfg.proxy_pass)
-    }} else {{
+    } else {
         $p.UseDefaultCredentials = $true
-    }}
+    }
     $handler.Proxy = $p
     $handler.UseProxy = $true
-}} elseif ($cfg.proxy_user) {{
+} elseif ($cfg.proxy_user) {
     $handler.DefaultProxyCredentials = New-Object System.Net.NetworkCredential([string]$cfg.proxy_user, [string]$cfg.proxy_pass)
-}}
+}
 $client = New-Object System.Net.Http.HttpClient($handler)
 $client.Timeout = [TimeSpan]::FromSeconds([int]$cfg.timeout_sec)
 
 $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::new([string]$cfg.method), [string]$cfg.url)
-foreach ($prop in $cfg.headers.PSObject.Properties) {{
-    if ($prop.Name -ieq 'Content-Type') {{ continue }}
+foreach ($prop in $cfg.headers.PSObject.Properties) {
+    if ($prop.Name -ieq 'Content-Type') { continue }
     $req.Headers.TryAddWithoutValidation($prop.Name, [string]$prop.Value) | Out-Null
-}}
+}
 
 $inStreamReq = $null
-try {{
-    if ($cfg.input_file) {{
+try {
+    if ($cfg.input_file) {
         $inStreamReq = [System.IO.File]::OpenRead([string]$cfg.input_file)
         $req.Content = New-Object System.Net.Http.StreamContent($inStreamReq)
-        if ($cfg.headers.'Content-Type') {{
+        if ($cfg.headers.'Content-Type') {
             $req.Content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse([string]$cfg.headers.'Content-Type')
-        }}
-    }}
+        }
+    }
 
     $resp = $client.SendAsync($req, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
     $code = [int]$resp.StatusCode
-    if ($cfg.output_file) {{
-        if ($code -ge 200 -and $code -lt 300) {{
+    if ($cfg.output_file) {
+        if ($code -ge 200 -and $code -lt 300) {
             $inStream = $resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
             $outStream = [System.IO.File]::Create([string]$cfg.output_file)
-            try {{
+            try {
                 $inStream.CopyTo($outStream)
-            }} finally {{
+            } finally {
                 $outStream.Dispose()
                 $inStream.Dispose()
-            }}
-        }}
-        [PSCustomObject]@{{ StatusCode = $code; BodyB64 = '' }} | ConvertTo-Json -Compress
-    }} else {{
+            }
+        }
+        [PSCustomObject]@{ StatusCode = $code; BodyB64 = '' } | ConvertTo-Json -Compress
+    } else {
         $respBytes = $resp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
         $respB64 = [System.Convert]::ToBase64String($respBytes)
-        [PSCustomObject]@{{ StatusCode = $code; BodyB64 = $respB64 }} | ConvertTo-Json -Compress
-    }}
-}} finally {{
-    if ($inStreamReq -ne $null) {{ $inStreamReq.Dispose() }}
-}}
+        [PSCustomObject]@{ StatusCode = $code; BodyB64 = $respB64 } | ConvertTo-Json -Compress
+    }
+} finally {
+    if ($inStreamReq -ne $null) { $inStreamReq.Dispose() }
+}
 """
+        ps_exe = str(
+            Path(os.environ.get("SystemRoot", r"C:\Windows"))
+            / "System32"
+            / "WindowsPowerShell"
+            / "v1.0"
+            / "powershell.exe"
+        )
+        if not Path(ps_exe).exists():
+            ps_exe = "powershell"
+
+        run_kwargs: dict[str, Any] = {
+            "input": json.dumps(cfg_payload),
+            "capture_output": True,
+            "text": True,
+            "timeout": timeout_sec + 10,
+        }
+        if sys.platform == "win32":
+            run_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
         proc = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec + 10,
+            [ps_exe, "-NoProfile", "-NonInteractive", "-Command", ps_script],
+            **run_kwargs,
         )
         if proc.returncode != 0:
             raise ConnectionError(f"Fallo en PowerShell HttpClient: {proc.stderr.strip()}")
@@ -574,12 +586,11 @@ try {{
         body = base64.b64decode(res["BodyB64"]) if res.get("BodyB64") else b""
         return status, body, {}
     finally:
-        for p_tmp in (cfg_tmp_path, in_tmp_path):
-            if p_tmp:
-                try:
-                    Path(p_tmp).unlink(missing_ok=True)
-                except Exception:
-                    pass
+        if in_tmp_path:
+            try:
+                Path(in_tmp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def _crear_opener_urllib_y_request(
@@ -602,10 +613,6 @@ def _crear_opener_urllib_y_request(
             incluir_creds = bool(user) and auth_mode != AUTH_WINDOWS_SSPI
             proxy_url = construir_proxy_url_manual(proxy_config, incluir_credenciales=incluir_creds)
             proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-            if incluir_creds:
-                auth_str = f"{user}:{pwd}"
-                b64_auth = base64.b64encode(auth_str.encode("utf-8")).decode("ascii")
-                req.add_header("Proxy-Authorization", f"Basic {b64_auth}")
             opener = urllib.request.build_opener(proxy_handler)
     elif modo == MODO_WINDOWS_SSO:
         sso_server = _limpiar_servidor_proxy(str((proxy_config or {}).get("proxy_sso_server") or ""))

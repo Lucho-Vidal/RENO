@@ -424,31 +424,50 @@ CREATE TRIGGER trg_reno_ordenamientos_updated BEFORE UPDATE ON reno_ordenamiento
 -- ==============================================================================
 -- 5. CONCESIÓN DE PRIVILEGIOS DE BASE DE DATOS (POSTGRESQL ROLES)
 -- ==============================================================================
--- Garantiza que las conexiones del API REST de Supabase (anon y authenticated)
--- posean permisos totales de lectura, inserción, actualización y ejecución.
+-- Se otorgan permisos únicamente sobre el esquema y las tablas/secuencias propias
+-- de RENO (prefijo reno_*), evitando afectar otras apps coexistentes (ej. CRONO-PCT).
 
 GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
 
-GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated, service_role;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated, service_role;
-GRANT ALL ON ALL ROUTINES IN SCHEMA public TO anon, authenticated, service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON
+    reno_dotaciones,
+    reno_tipos_novedad,
+    reno_personal_estacion,
+    reno_destinatarios_informe,
+    reno_destinatarios_ordenamiento,
+    reno_roles,
+    reno_permisos,
+    reno_rol_permisos,
+    reno_usuarios,
+    reno_usuario_roles,
+    reno_empleados,
+    reno_novedades,
+    reno_novedad_reemplazos,
+    reno_cambios_turno,
+    reno_ciclo_jornadas,
+    reno_turnos_itinerario,
+    reno_turnos_vueltas,
+    reno_tren_paradas,
+    reno_ordenamientos,
+    reno_ordenamiento_tramos,
+    reno_configuracion
+TO anon, authenticated, service_role;
 
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated, service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO anon, authenticated, service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON ROUTINES TO anon, authenticated, service_role;
+-- Auditoría es de solo lectura/inserción (append-only) para clientes; solo service_role puede mantenerla
+GRANT SELECT, INSERT ON reno_auditoria TO anon, authenticated;
+GRANT ALL ON reno_auditoria TO service_role;
+
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated, service_role;
 
 
 -- ==============================================================================
 -- 6. SEGURIDAD A NIVEL DE FILA (ROW LEVEL SECURITY - RLS)
 -- ==============================================================================
--- "Todos los usuarios con diferentes roles deben poder subir cambios":
---
--- La aplicación RENO gestiona sus propios roles internos (Operador, Supervisor,
--- Jefatura, Administrador) y sincroniza a través del cliente REST con la clave anon/auth.
--- Para asegurar que NINGÚN usuario ni rol de la app sea rechazado por Supabase
--- con error 403 o violación de RLS al realizar INSERT/UPDATE/DELETE (Upsert),
--- se habilitan políticas universales permisivas (USING true WITH CHECK true)
--- para todos los roles de Supabase (anon, authenticated y service_role).
+-- NOTA DE SEGURIDAD:
+-- Para un endurecimiento completo en producción sobre internet abierta, se recomienda
+-- migrar la autenticación de clientes a Supabase Auth (JWT 'authenticated') o
+-- sincronizar a través de Edge Functions / RPC SECURITY DEFINER de forma que
+-- reno_usuarios.password_hash no quede expuesto vía PostgREST a la clave pública anon.
 
 ALTER TABLE reno_dotaciones ENABLE ROW LEVEL SECURITY;
 ALTER TABLE reno_tipos_novedad ENABLE ROW LEVEL SECURITY;
@@ -473,7 +492,7 @@ ALTER TABLE reno_ordenamiento_tramos ENABLE ROW LEVEL SECURITY;
 ALTER TABLE reno_configuracion ENABLE ROW LEVEL SECURITY;
 ALTER TABLE reno_auditoria ENABLE ROW LEVEL SECURITY;
 
--- Políticas universales sin restricciones:
+-- Políticas operativas:
 DROP POLICY IF EXISTS "reno_permitir_todo_dotaciones" ON reno_dotaciones;
 CREATE POLICY "reno_permitir_todo_dotaciones" ON reno_dotaciones FOR ALL TO anon, authenticated, service_role USING (true) WITH CHECK (true);
 
@@ -537,15 +556,21 @@ CREATE POLICY "reno_permitir_todo_ord_tramos" ON reno_ordenamiento_tramos FOR AL
 DROP POLICY IF EXISTS "reno_permitir_todo_configuracion" ON reno_configuracion;
 CREATE POLICY "reno_permitir_todo_configuracion" ON reno_configuracion FOR ALL TO anon, authenticated, service_role USING (true) WITH CHECK (true);
 
+-- Auditoría inmutable (solo SELECT e INSERT para clientes; sin UPDATE ni DELETE)
 DROP POLICY IF EXISTS "reno_permitir_todo_auditoria" ON reno_auditoria;
-CREATE POLICY "reno_permitir_todo_auditoria" ON reno_auditoria FOR ALL TO anon, authenticated, service_role USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS "reno_auditoria_leer" ON reno_auditoria;
+DROP POLICY IF EXISTS "reno_auditoria_insertar" ON reno_auditoria;
+DROP POLICY IF EXISTS "reno_auditoria_service_role" ON reno_auditoria;
+CREATE POLICY "reno_auditoria_leer" ON reno_auditoria FOR SELECT TO anon, authenticated, service_role USING (true);
+CREATE POLICY "reno_auditoria_insertar" ON reno_auditoria FOR INSERT TO anon, authenticated, service_role WITH CHECK (true);
+CREATE POLICY "reno_auditoria_service_role" ON reno_auditoria FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 
 -- ==============================================================================
 -- 7. SUPABASE STORAGE BUCKET 'updates' (AUTO-UPDATER OTA)
 -- ==============================================================================
--- Habilita el bucket de almacenamiento público para que RENO descargue
--- instaladores y actualizaciones automáticas de forma transparente.
+-- Lectura pública para descargas OTA; escritura/sobrescritura restringida
+-- EXCLUSIVAMENTE a service_role (usado por scripts/publicar_actualizacion.py).
 
 INSERT INTO storage.buckets (id, name, public)
 VALUES ('updates', 'updates', true)
@@ -558,7 +583,7 @@ CREATE POLICY "reno_storage_leer_updates" ON storage.objects
 
 DROP POLICY IF EXISTS "reno_storage_subir_updates" ON storage.objects;
 CREATE POLICY "reno_storage_subir_updates" ON storage.objects
-    FOR ALL TO anon, authenticated, service_role
+    FOR ALL TO service_role
     USING (bucket_id = 'updates')
     WITH CHECK (bucket_id = 'updates');
 

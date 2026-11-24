@@ -54,7 +54,7 @@ class CambiosTurnoView(QWidget):
         self.pdf_service = pdf_service
         self.word_service = word_service
         self.usuario_actual = usuario_actual or {}
-        self.tiene_permiso = tiene_permiso_fn or (lambda p: True)
+        self.tiene_permiso = tiene_permiso_fn or (lambda _p: False)
 
         self._init_ui()
         self.recargar_datos()
@@ -75,11 +75,17 @@ class CambiosTurnoView(QWidget):
 
         self.btn_editar = QPushButton("✏️ Modificar")
         self.btn_editar.setObjectName("btnSecondary")
+        self.btn_editar.setEnabled(
+            self.tiene_permiso("cambios_turno.editar") or self.tiene_permiso("registros.modificar")
+        )
         self.btn_editar.clicked.connect(self._modificar_cambio)
         toolbar.addWidget(self.btn_editar)
 
         self.btn_eliminar = QPushButton("🗑️ Eliminar")
         self.btn_eliminar.setObjectName("btnDanger")
+        self.btn_eliminar.setEnabled(
+            self.tiene_permiso("cambios_turno.eliminar") or self.tiene_permiso("registros.modificar")
+        )
         self.btn_eliminar.clicked.connect(self._eliminar_cambio)
         toolbar.addWidget(self.btn_eliminar)
 
@@ -236,12 +242,16 @@ class CambiosTurnoView(QWidget):
             self.registro_modificado.emit()
 
     def _modificar_cambio(self) -> None:
+        puede_modificar_libre = self.tiene_permiso("registros.modificar")
+        if not (puede_modificar_libre or self.tiene_permiso("cambios_turno.editar")):
+            QMessageBox.warning(self, "Acceso denegado", "No tiene permisos para modificar cambios de turno.")
+            return
+
         fila = self._obtener_fila_seleccionada()
         if not fila:
             QMessageBox.information(self, "Modificar", "Seleccione un cambio de turno en la tabla.")
             return
 
-        puede_modificar_libre = self.tiene_permiso("registros.modificar")
         dentro_ventana = self.records_service.dentro_de_ventana(fila["registrado_en"], "editar_horas")
 
         if not puede_modificar_libre and not dentro_ventana:
@@ -263,12 +273,16 @@ class CambiosTurnoView(QWidget):
             self.registro_modificado.emit()
 
     def _eliminar_cambio(self) -> None:
+        puede_eliminar_libre = self.tiene_permiso("registros.modificar")
+        if not (puede_eliminar_libre or self.tiene_permiso("cambios_turno.eliminar")):
+            QMessageBox.warning(self, "Acceso denegado", "No tiene permisos para eliminar cambios de turno.")
+            return
+
         fila = self._obtener_fila_seleccionada()
         if not fila:
             QMessageBox.information(self, "Eliminar", "Seleccione un cambio de turno en la tabla.")
             return
 
-        puede_eliminar_libre = self.tiene_permiso("registros.modificar")
         dentro_ventana = self.records_service.dentro_de_ventana(fila["registrado_en"], "eliminar_horas")
 
         if not puede_eliminar_libre and not dentro_ventana:
@@ -348,4 +362,6 @@ class CambiosTurnoView(QWidget):
             QMessageBox.critical(self, "Error", f"No se pudo generar el documento Word:\n{e}")
 
     def _on_double_click(self, index) -> None:
+        if not (self.tiene_permiso("cambios_turno.editar") or self.tiene_permiso("registros.modificar")):
+            return
         self._modificar_cambio()

@@ -214,7 +214,10 @@ def _expandir_candidatos_url_custom(url_custom: str, bucket: str) -> list[str]:
     raw = str(url_custom or "").strip()
     if not raw:
         return []
-    if not raw.lower().startswith(("http://", "https://")):
+    if raw.lower().startswith("http://"):
+        logger.warning("URL OTA insegura (http://) rechazada: %s", raw)
+        return []
+    if not raw.lower().startswith("https://"):
         raw = f"https://{raw.lstrip('/')}"
 
     # Si pegaron la URL del Dashboard de Supabase (supabase.com/dashboard/project/<ref>...)
@@ -512,19 +515,43 @@ class DescargarActualizacionWorker(QThread):
         self._cancelado = True
 
     def run(self) -> None:
-        carpeta_temp = Path(tempfile.gettempdir()) / "RENO_Updates"
+        carpeta_temp = (Path(tempfile.gettempdir()) / "RENO_Updates").resolve()
         carpeta_temp.mkdir(parents=True, exist_ok=True)
 
-        nombre_archivo = self.info.instalador_nombre or f"RENO_Setup_v{self.info.version}.exe"
-        if not nombre_archivo.endswith(".exe"):
+        nombre_raw = str(self.info.instalador_nombre or f"RENO_Setup_v{self.info.version}.exe").strip()
+        if Path(nombre_raw).name != nombre_raw or "/" in nombre_raw or "\\" in nombre_raw:
+            self.error_descarga.emit("Nombre de instalador inválido en el manifiesto de actualización.")
+            return
+        nombre_archivo = Path(nombre_raw).name
+        if not nombre_archivo.lower().endswith(".exe"):
             nombre_archivo += ".exe"
-        ruta_final = carpeta_temp / nombre_archivo
+        if not re.fullmatch(r"[A-Za-z0-9._-]+\.exe", nombre_archivo):
+            self.error_descarga.emit("Nombre de instalador contiene caracteres no permitidos.")
+            return
+        ruta_final = (carpeta_temp / nombre_archivo).resolve()
+        if not ruta_final.is_relative_to(carpeta_temp):
+            self.error_descarga.emit("Ruta de descarga fuera del directorio temporal permitido.")
+            return
+
+        # Verificar SHA-256 obligatorio en el manifiesto antes de descargar
+        sha_esperado = str(self.info.sha256 or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", sha_esperado):
+            logger.error("Manifiesto OTA rechazado: falta hash SHA-256 válido.")
+            self.error_descarga.emit(
+                "El manifiesto de actualización no incluye un hash SHA-256 válido. Descarga abortada por seguridad."
+            )
+            return
 
         # Determinar si es descarga multi-parte o archivo único
         lista_urls = self.info.partes if self.info.partes else ([self.info.instalador_url] if self.info.instalador_url else [])
         if not lista_urls:
             self.error_descarga.emit("El manifiesto de actualización no contiene URLs de descarga válidas.")
             return
+        for u in lista_urls:
+            if not str(u or "").strip().lower().startswith("https://"):
+                logger.error("URL de descarga OTA insegura rechazada: %s", u)
+                self.error_descarga.emit("URL de descarga insegura (se requiere HTTPS). Descarga abortada.")
+                return
 
         total_esperado = self.info.tamano_bytes or 0
         bytes_base_segmentos = 0
@@ -587,22 +614,21 @@ class DescargarActualizacionWorker(QThread):
                 self.error_descarga.emit("Descarga cancelada por el usuario.")
                 return
 
-            # Verificación criptográfica SHA-256
-            if self.info.sha256:
-                hash_calculado = calcular_sha256(ruta_final)
-                if hash_calculado != self.info.sha256:
-                    logger.error(
-                        "Error de integridad SHA-256. Esperado: %s, Calculado: %s",
-                        self.info.sha256,
-                        hash_calculado,
-                    )
-                    try:
-                        ruta_final.unlink()
-                    except Exception:
-                        pass
-                    self.error_descarga.emit("El archivo descargado está corrupto (error de verificación SHA-256).")
-                    return
-                logger.info("Integridad SHA-256 verificada con éxito: %s", hash_calculado)
+            # Verificación criptográfica SHA-256 obligatoria
+            hash_calculado = calcular_sha256(ruta_final)
+            if hash_calculado != sha_esperado:
+                logger.error(
+                    "Error de integridad SHA-256. Esperado: %s, Calculado: %s",
+                    sha_esperado,
+                    hash_calculado,
+                )
+                try:
+                    ruta_final.unlink()
+                except Exception:
+                    pass
+                self.error_descarga.emit("El archivo descargado está corrupto (error de verificación SHA-256).")
+                return
+            logger.info("Integridad SHA-256 verificada con éxito: %s", hash_calculado)
 
             # Notificar éxito
             self.progreso.emit(bytes_acumulados, bytes_acumulados, 0.0, "Descarga completada e integridad verificada.")

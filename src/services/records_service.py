@@ -932,6 +932,32 @@ class RecordsService:
             self._enqueue_sync(conn, "novedades", record_id, "INSERT", after)
             return record_id
 
+    def _usuario_tiene_permiso_db(self, conn, user_id: Optional[int], permission_code: str) -> Optional[bool]:
+        """Verifica permiso RBAC en BD si el usuario existe; devuelve None si user_id es None o no existe."""
+        if user_id is None:
+            return None
+        existe = conn.execute("SELECT 1 FROM usuarios WHERE id=? LIMIT 1", (int(user_id),)).fetchone()
+        if not existe:
+            return None
+        es_admin = conn.execute(
+            """SELECT 1 FROM usuario_roles ur
+               JOIN roles r ON r.id=ur.rol_id
+               WHERE ur.usuario_id=? AND LOWER(r.nombre) IN ('administrador', 'admin')
+               LIMIT 1""",
+            (int(user_id),),
+        ).fetchone()
+        if es_admin:
+            return True
+        perm = conn.execute(
+            """SELECT 1 FROM usuario_roles ur
+               JOIN rol_permisos rp ON rp.rol_id=ur.rol_id
+               JOIN permisos p ON p.id=rp.permiso_id
+               WHERE ur.usuario_id=? AND p.codigo=?
+               LIMIT 1""",
+            (int(user_id), permission_code),
+        ).fetchone()
+        return perm is not None
+
     def actualizar_novedad(
         self,
         record_id: int,
@@ -946,22 +972,26 @@ class RecordsService:
             "supervisor", "observaciones",
         )
         leg_val = int(str(data["legajo"]).strip())
-        self.validar_novedad_superpuesta(
-            leg_val,
-            data.get("fecha_inicio"),
-            data.get("fecha_fin"),
-            excluir_novedad_id=record_id,
-        )
         win_usr = (windows_user or data.get("usuario_windows") or "").strip() or obtener_usuario_windows()
+        now_ts = self.db.now()
         with self.db.write_transaction() as conn:
             before = conn.execute("SELECT * FROM novedades WHERE id=?", (record_id,)).fetchone()
             if not before:
                 raise ValueError("La novedad no existe.")
-            if not bypass_window and not self.dentro_de_ventana(before["registrado_en"], "editar_horas"):
+            perm_mod = self._usuario_tiene_permiso_db(conn, user_id, "registros.modificar")
+            puede_bypass = bool(bypass_window and (perm_mod is None or perm_mod))
+            if not puede_bypass and not self.dentro_de_ventana(before["registrado_en"], "editar_horas"):
                 raise ValueError("El registro superó el tiempo permitido para editar.")
 
-            assignments = ", ".join(f"{field}=?" for field in fields) + ", usuario_windows=?"
-            values = tuple(data[field] for field in fields) + (win_usr, record_id)
+            self.validar_novedad_superpuesta(
+                leg_val,
+                data.get("fecha_inicio"),
+                data.get("fecha_fin"),
+                excluir_novedad_id=record_id,
+            )
+
+            assignments = ", ".join(f"{field}=?" for field in fields) + ", usuario_windows=?, updated_at=?, sync_status='pending'"
+            values = tuple(data[field] for field in fields) + (win_usr, now_ts, record_id)
             conn.execute(f"UPDATE novedades SET {assignments} WHERE id=?", values)
             after = dict(conn.execute("SELECT * FROM novedades WHERE id=?", (record_id,)).fetchone())
             self._audit(conn, user_id, win_usr, "modificar", "novedad", record_id, dict(before), after)
@@ -1134,15 +1164,18 @@ class RecordsService:
             "fecha_cambio", "referencia_estacion", "supervisor", "observaciones",
         )
         win_usr = (windows_user or data.get("usuario_windows") or "").strip() or obtener_usuario_windows()
+        now_ts = self.db.now()
         with self.db.write_transaction() as conn:
             before = conn.execute("SELECT * FROM cambios_turno WHERE id=?", (record_id,)).fetchone()
             if not before:
                 raise ValueError("El cambio de turno no existe.")
-            if not bypass_window and not self.dentro_de_ventana(before["registrado_en"], "editar_horas"):
+            perm_mod = self._usuario_tiene_permiso_db(conn, user_id, "registros.modificar")
+            puede_bypass = bool(bypass_window and (perm_mod is None or perm_mod))
+            if not puede_bypass and not self.dentro_de_ventana(before["registrado_en"], "editar_horas"):
                 raise ValueError("El registro superó el tiempo permitido para editar.")
 
-            assignments = ", ".join(f"{field}=?" for field in fields) + ", usuario_windows=?"
-            values = tuple(data[field] for field in fields) + (win_usr, record_id)
+            assignments = ", ".join(f"{field}=?" for field in fields) + ", usuario_windows=?, updated_at=?, sync_status='pending'"
+            values = tuple(data[field] for field in fields) + (win_usr, now_ts, record_id)
             conn.execute(f"UPDATE cambios_turno SET {assignments} WHERE id=?", values)
             after = dict(conn.execute("SELECT * FROM cambios_turno WHERE id=?", (record_id,)).fetchone())
             self._audit(conn, user_id, win_usr, "modificar", "cambio_turno", record_id, dict(before), after)
@@ -1155,13 +1188,19 @@ class RecordsService:
         windows_user: Optional[str] = None,
         bypass_window: bool = False,
     ) -> None:
+        now_ts = self.db.now()
         with self.db.write_transaction() as conn:
             before = conn.execute("SELECT * FROM cambios_turno WHERE id=?", (record_id,)).fetchone()
             if not before:
                 raise ValueError("La cambio de turno no existe.")
-            if not bypass_window and not self.dentro_de_ventana(before["registrado_en"], "eliminar_horas"):
+            perm_mod = self._usuario_tiene_permiso_db(conn, user_id, "registros.modificar")
+            puede_bypass = bool(bypass_window and (perm_mod is None or perm_mod))
+            if not puede_bypass and not self.dentro_de_ventana(before["registrado_en"], "eliminar_horas"):
                 raise ValueError("El registro superó el tiempo permitido para eliminar.")
-            conn.execute("UPDATE cambios_turno SET activo=0, sync_status='pending' WHERE id=?", (record_id,))
+            conn.execute(
+                "UPDATE cambios_turno SET activo=0, sync_status='pending', updated_at=? WHERE id=?",
+                (now_ts, record_id),
+            )
             after = dict(conn.execute("SELECT * FROM cambios_turno WHERE id=?", (record_id,)).fetchone())
             self._audit(conn, user_id, windows_user, "eliminar", "cambio_turno", record_id, dict(before), {"activo": 0})
             self._enqueue_sync(conn, "cambios_turno", record_id, "UPDATE", after)

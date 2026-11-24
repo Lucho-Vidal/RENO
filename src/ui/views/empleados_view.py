@@ -44,20 +44,27 @@ class EmpleadosView(QWidget):
         records_service: RecordsService,
         excel_service: ExcelService,
         usuario_actual: Optional[Dict[str, Any]] = None,
+        tiene_permiso_fn=None,
         parent=None,
     ):
         super().__init__(parent)
         self.records_service = records_service
         self.excel_service = excel_service
         self.usuario_actual = usuario_actual or {}
+        self.tiene_permiso = tiene_permiso_fn or (lambda _p: False)
 
         self._init_ui()
         self.recargar()
+
+    def _puede_administrar(self) -> bool:
+        return bool(self.tiene_permiso("empleados.administrar"))
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
+
+        puede_admin = self._puede_administrar()
 
         # 1. Barra de herramientas superior
         bar_frame = QFrame()
@@ -67,16 +74,19 @@ class EmpleadosView(QWidget):
         bar.setSpacing(10)
 
         self.btn_nuevo = QPushButton("➕ Nuevo Empleado")
+        self.btn_nuevo.setEnabled(puede_admin)
         self.btn_nuevo.clicked.connect(self._nuevo_empleado)
         bar.addWidget(self.btn_nuevo)
 
         self.btn_editar = QPushButton("✏️ Modificar")
         self.btn_editar.setObjectName("btnSecondary")
+        self.btn_editar.setEnabled(puede_admin)
         self.btn_editar.clicked.connect(self._modificar_empleado)
         bar.addWidget(self.btn_editar)
 
         self.btn_toggle = QPushButton("🔄 Activar / Desactivar")
         self.btn_toggle.setObjectName("btnSecondary")
+        self.btn_toggle.setEnabled(puede_admin)
         self.btn_toggle.clicked.connect(self._toggle_estado)
         bar.addWidget(self.btn_toggle)
 
@@ -87,6 +97,7 @@ class EmpleadosView(QWidget):
 
         self.btn_importar = QPushButton("📥 Importar Excel")
         self.btn_importar.setObjectName("btnSecondary")
+        self.btn_importar.setEnabled(puede_admin)
         self.btn_importar.clicked.connect(self._importar_excel)
         bar.addWidget(self.btn_importar)
 
@@ -107,6 +118,7 @@ class EmpleadosView(QWidget):
 
         self.btn_remociones = QPushButton("🔄 Remociones")
         self.btn_remociones.setObjectName("btnSecondary")
+        self.btn_remociones.setEnabled(puede_admin)
         self.btn_remociones.clicked.connect(self._abrir_remociones)
         bar.addWidget(self.btn_remociones)
 
@@ -215,12 +227,20 @@ class EmpleadosView(QWidget):
         return self.model.get_row(source_idx.row())
 
     def _on_double_click(self, index) -> None:
+        if not self._puede_administrar():
+            return
         self._modificar_empleado()
 
     def _nuevo_empleado(self) -> None:
+        if not self._puede_administrar():
+            QMessageBox.warning(self, "Acceso denegado", "No tiene permisos para administrar empleados.")
+            return
         self._formulario_empleado(None)
 
     def _modificar_empleado(self) -> None:
+        if not self._puede_administrar():
+            QMessageBox.warning(self, "Acceso denegado", "No tiene permisos para modificar empleados.")
+            return
         emp = self._obtener_seleccionado()
         if not emp:
             QMessageBox.information(self, "Modificar", "Seleccione un empleado en la tabla.")
@@ -228,6 +248,8 @@ class EmpleadosView(QWidget):
         self._formulario_empleado(emp)
 
     def _formulario_empleado(self, emp_existente: Optional[Dict[str, Any]]) -> None:
+        if not self._puede_administrar():
+            return
         dlg = BaseDialog(self)
         dlg.setWindowTitle("Modificar Empleado" if emp_existente else "Nuevo Empleado")
         dlg.resize(460, 420)
@@ -312,6 +334,9 @@ class EmpleadosView(QWidget):
                 QMessageBox.critical(self, "Error", f"Fallo al guardar empleado:\n{e}")
 
     def _toggle_estado(self) -> None:
+        if not self._puede_administrar():
+            QMessageBox.warning(self, "Acceso denegado", "No tiene permisos para activar o desactivar empleados.")
+            return
         emp = self._obtener_seleccionado()
         if not emp:
             QMessageBox.information(self, "Activar / Desactivar", "Seleccione un empleado.")
@@ -331,6 +356,9 @@ class EmpleadosView(QWidget):
             QMessageBox.critical(self, "Error", f"No se pudo {accion} el empleado:\n{e}")
 
     def _importar_excel(self) -> None:
+        if not self._puede_administrar():
+            QMessageBox.warning(self, "Acceso denegado", "No tiene permisos para importar empleados.")
+            return
         path, _ = QFileDialog.getOpenFileName(self, "Importar Empleados desde Excel", "", "Excel (*.xlsx *.xlsm)")
         if not path:
             return
@@ -368,6 +396,9 @@ class EmpleadosView(QWidget):
         dlg.exec()
 
     def _abrir_remociones(self) -> None:
+        if not self._puede_administrar():
+            QMessageBox.warning(self, "Acceso denegado", "No tiene permisos para administrar remociones.")
+            return
         from src.ui.views.dialogs.remociones_dialogs import RemocionesDialog
 
         dlg = RemocionesDialog(
