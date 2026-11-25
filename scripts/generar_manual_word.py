@@ -442,8 +442,8 @@ class ManualGenerator:
         self.add_title_cover(
             title="Manual de Usuario y Operación",
             subtitle="Guía Paso a Paso para la Carga, Cobertura, Gestión y Administración",
-            app_name="RENO (Registro de Novedades y Turnos)",
-            version="2.0 (Edición Ampliada)",
+            app_name="RENO v2.0 (Registro de Novedades y Turnos)",
+            version="2.0.0 (Edición Completa PySide6)",
             author="Luciano Vidal",
             date_str="Noviembre 2026"
         )
@@ -460,11 +460,13 @@ class ManualGenerator:
         self._build_section_9_tablas_filtros()
         self._build_section_10_detalle_edicion()
         self._build_section_11_personal_ciclo()
-        self._build_section_12_export_import()
-        self._build_section_13_notificaciones()
-        self._build_section_14_administracion()
-        self._build_section_15_faq()
-        self._build_section_16_anexo_permisos()
+        self._build_section_12_conocimiento_via()
+        self._build_section_13_export_import()
+        self._build_section_14_notificaciones()
+        self._build_section_15_sincronizacion_anillo()
+        self._build_section_16_administracion()
+        self._build_section_17_faq()
+        self._build_section_18_anexo_permisos()
 
         os.makedirs(os.path.dirname(os.path.abspath(self.output_path)), exist_ok=True)
         self.doc.save(self.output_path)
@@ -473,22 +475,24 @@ class ManualGenerator:
     def _build_table_of_contents(self):
         self.add_h1("Índice de Contenidos")
         toc_items = [
-            ("1. Introducción y Arquitectura del Sistema", "Propósito, persistencia compartida en red y sincronización"),
-            ("2. Instalación y Primer Uso", "Archivos requeridos, configuración path_base y creación del Administrador"),
+            ("1. Introducción y Arquitectura del Sistema", "Propósito, arquitectura híbrida, SQLite local y sincronización"),
+            ("2. Instalación y Primer Uso", "Archivos requeridos, configuración de base de datos y creación del Administrador"),
             ("3. Acceso, Seguridad y Control de Sesión", "Inicio de sesión, recuperación de contraseña por email y caducidad"),
-            ("4. Interfaz General y Navegación", "Ventana principal maximizada, barra de menús y temas visuales"),
+            ("4. Interfaz General y Navegación", "Ventana principal maximizada, pestañas PySide6 y temas claro/oscuro"),
             ("5. Panel de Control (Dashboard)", "Tarjetas de estado, métricas en tiempo real y gráficos estadísticos"),
             ("6. Registro de Novedades (Paso a Paso)", "Carga de novedades, búsqueda de personal, autocompletado y envío"),
             ("7. Cobertura de Novedades y Reemplazos de Ciclo", "Asignación de tramos, validación de cruces y estados de cobertura"),
             ("8. Registro de Cambios de Turno (Paso a Paso)", "Intercambio de turnos entre empleados, fechas y supervisor"),
-            ("9. Tablas Operativas y Filtrado en Vivo", "Listados cronológicos, filtros por nombre/dotación y refresco 60s"),
+            ("9. Tablas Operativas y Filtrado en Vivo", "Listados cronológicos, filtros por nombre/dotación y refresco continuo"),
             ("10. Detalle, Modificación y Eliminación", "Modales de detalle, límites de 24h/72h y modo restringido"),
             ("11. Módulo de Personal de Ciclo y Calendario", "Personal disponible/asignado, descansos CCT (18h/42h) y órdenes diarias"),
-            ("12. Reportes, Descubiertos y Exportación a Excel", "Exportación filtrada, reporte de turnos sin cubrir e importación"),
-            ("13. Sistema de Notificaciones y Avisos Toasts", "Menú de registros nuevos con contador y avisos emergentes"),
-            ("14. Módulo de Administración del Sistema", "Usuarios, roles, empleados, catálogos, backups y auditoría"),
-            ("15. Preguntas Frecuentes y Solución de Problemas", "Base ocupada, problemas de red, restablecimiento de acceso"),
-            ("16. Anexo: Matriz de Permisos por Rol", "Detalle de permisos por módulo y acción en el sistema"),
+            ("12. Módulo de Conocimiento de Vía por Sector", "Matriz de sectores, sentidos ASC/DESC, semáforos CCT, autocompletado individual y masivo"),
+            ("13. Reportes, Descubiertos y Exportación a Excel", "Exportación filtrada, reporte de turnos sin cubrir e importación"),
+            ("14. Sistema de Notificaciones y Avisos Toasts", "Menú de registros nuevos con contador y avisos emergentes"),
+            ("15. Sincronización Híbrida en Modo Anillo (SMB ↔ Supabase)", "Topología anillo, failover automático, retransmisión sin bucles y estado de red"),
+            ("16. Módulo de Administración del Sistema", "Usuarios, roles, empleados, catálogos, backups y auditoría"),
+            ("17. Preguntas Frecuentes y Solución de Problemas", "Base ocupada, operación sin internet, resolución de conflictos"),
+            ("18. Anexo: Matriz de Permisos por Rol", "Nómina completa de permisos del sistema por módulo y perfil"),
         ]
         for title, desc in toc_items:
             self.add_p(f"{title} — {desc}", bullet=True)
@@ -497,30 +501,42 @@ class ManualGenerator:
     def _build_section_1_intro(self):
         self.add_h1("1. Introducción y Arquitectura del Sistema")
         self.add_p(
-            "La aplicación RENO (Registro de Novedades y Cambios de Turno) ha sido diseñada "
-            "para reemplazar las tradicionales planillas compartidas de Excel por un sistema "
-            "de escritorio robusto, ágil y seguro basado en una base de datos centralizada SQLite."
+            "La aplicación RENO (Registro de Novedades y Cambios de Turno) v2.0 ha sido desarrollada "
+            "en Python con PySide6-Essentials adoptando el estándar arquitectónico y visual de CRONO-PCT. "
+            "Diseñada para reemplazar de forma definitiva las tradicionales planillas compartidas de Excel "
+            "por un sistema de escritorio robusto, ágil y con persistencia híbrida de alta disponibilidad."
         )
         self.add_p(
-            "Al ejecutarse sobre una base de datos estructurada con validaciones automáticas, "
-            "se eliminan los riesgos de sobreescritura accidental, borrado de fórmulas y "
-            "lentitud generada por macros de Excel en carpetas compartidas."
+            "Al ejecutarse sobre un motor de base de datos relacional con validaciones automáticas de CCT, "
+            "se eliminan los riesgos de sobreescritura accidental, borrado de fórmulas y lentitud generada "
+            "por macros de Excel en carpetas compartidas."
         )
-        self.add_h2("1.1 Funcionamiento en Red Local Compartida")
+        self.add_h2("1.1 Arquitectura Híbrida: SQLite Local-First y Cola Outbox")
         self.add_p(
-            "RENO permite que múltiples estaciones de trabajo (computadoras en distintas dependencias o estaciones) "
-            "operen simultáneamente contra una única base de datos ubicada en una carpeta compartida de red (SMB/Windows):",
-            bold_prefix="Concurrencia transparente:"
+            "RENO opera bajo el paradigma Local-First. Cada puesto de trabajo cuenta con una base SQLite local "
+            "optimizada, garantizando que todas las lecturas, consultas, filtros y grabaciones se ejecuten "
+            "con tiempo de respuesta instantáneo (0 ms de latencia de red):",
+            bold_prefix="Alta disponibilidad y velocidad:"
         )
-        self.add_p("Las lecturas no bloquean el archivo, permitiendo que varios usuarios consulten las tablas a la vez.", bullet=True)
-        self.add_p("Las operaciones de guardado, modificación o borrado utilizan transacciones breves con bloqueo externo seguro.", bullet=True)
-        self.add_p("Cada 60 segundos la aplicación refresca automáticamente los datos desde el archivo central sin interrumpir la escritura del usuario.", bullet=True)
-        
+        self.add_p("Operación continua sin cuelgues: La interfaz gráfica nunca se congela esperando respuestas de servidores remotos.", bullet=True)
+        self.add_p("Cola transaccional (sync_outbox): Cada alta, edición o borrado se registra atómicamente en una tabla de salida que gestiona el envío hacia los canales externos.", bullet=True)
+        self.add_p("Sincronización en segundo plano: Hilos dedicados (QThread) sincronizan las novedades de forma transparente.", bullet=True)
+
+        self.add_h2("1.2 Modo Anillo de Doble Canal (Red Compartida SMB y Nube Supabase)")
+        self.add_p(
+            "El sistema incorpora una topología de sincronización en anillo única en su tipo, diseñada "
+            "para soportar contingencias de conectividad en dependencias ferroviarias:",
+            bold_prefix="Resiliencia multicanal:"
+        )
+        self.add_p("Canal Red Local (SMB): Sincroniza con la base compartida en la carpeta de red de Windows de la dependencia.", bullet=True)
+        self.add_p("Canal Nube (Supabase REST): Sincroniza en tiempo real contra PostgreSQL en la nube.", bullet=True)
+        self.add_p("Conmutación automática (Failover): Si una estación se queda sin internet, conmuta a la carpeta compartida; si está en campo sin red local, conmuta a la nube.", bullet=True)
+        self.add_p("Retransmisión sin bucles (Relay): Las terminales conectadas a ambos medios replican de manera segura los datos entre la red local y la nube.", bullet=True)
+
         self.add_callout(
-            "Para garantizar la máxima compatibilidad en unidades de red compartidas de Windows (SMB), "
-            "el sistema utiliza el modo de diario tradicional (journal_mode=DELETE) y no WAL (Write-Ahead Logging), "
-            "evitando bloqueos de archivos de memoria compartida entre distintas computadoras.",
-            title="ARQUITECTURA DE DATOS EN RED",
+            "La arquitectura híbrida asegura que ningún operador quede bloqueado: si se corta internet o la carpeta compartida, "
+            "el sistema continúa funcionando en modo local sin pérdida de información, y sincroniza automáticamente al reconectar.",
+            title="TOLERANCIA A FALLAS Y PERSISTENCIA",
             kind="info"
         )
 
@@ -628,33 +644,38 @@ class ManualGenerator:
     def _build_section_4_ui_overview(self):
         self.add_h1("4. Interfaz General y Navegación")
         self.add_p(
-            "La interfaz gráfica de RENO está diseñada con ttkbootstrap, ofreciendo un entorno visual moderno, "
-            "limpio y con alta legibilidad en pantallas táctiles o monitores estándar de oficina."
+            "La interfaz gráfica de RENO v2.0 está desarrollada en PySide6-Essentials, aplicando la hoja de estilos "
+            "institucional CRONO-PCT (crono_style.qss), lo que brinda una estética ferroviaria profesional, limpia, "
+            "con contrastes de alto confort visual y óptima legibilidad en monitores de control o pantallas táctiles."
         )
-        self.add_h2("4.1 Estructura de la Pantalla Principal")
-        self.add_p("La pantalla principal se divide en cuatro áreas fundamentales:")
-        self.add_p("Barra de Menús Superior: Da acceso a las funciones globales: Archivo, Registros nuevos, Opciones y Administración.", bullet=True)
-        self.add_p("Barra de Acceso y Estado: Muestra el usuario activo, rol, base conectada y botones de cambio rápido de vista.", bullet=True)
-        self.add_p("Área Central de Trabajo: Despliega las tablas de registros (Novedades o Cambios de Turno) o el Panel de Control.", bullet=True)
-        self.add_p("Modales Optimizados: Las ventanas de carga, detalle, búsqueda y administración se abren maximizadas para garantizar la visualización completa de datos y tablas sin necesidad de desplazamientos molestos.", bullet=True)
+        self.add_h2("4.1 Estructura de la Pantalla Principal y Pestañas")
+        self.add_p("La pantalla principal se organiza en módulos de trabajo mediante pestañas superiores:")
+        self.add_p("📊 Panel de Control (Dashboard): Métricas en tiempo real, KPIs operativos, 4 gráficos interactivos QPainter y exportación de informes ejecutivos en PDF, Excel o imagen.", bullet=True)
+        self.add_p("📋 Novedades: Registro cronológico con ordenamiento más reciente primero (ORDER BY id DESC), filtros combinados y estado de reemplazos.", bullet=True)
+        self.add_p("🔄 Cambios de Turno: Registro y control de permutas de servicio entre empleados con validación de especialidad y dotación.", bullet=True)
+        self.add_p("📅 Personal de Ciclo: Monitor de personal disponible/ocupado, asignación de tramos y cálculo de descansos de convenio (18h/42h).", bullet=True)
+        self.add_p("🛤️ Conocimiento de Vía: Matriz interactiva de sectores de vía para personal de conducción con semáforo CCT a 2 años y autocompletado individual y masivo.", bullet=True)
+        self.add_p("⚙️ Menú Administración: Gestión integral de usuarios, roles, empleados, catálogos, sincronización multicanal, backups y auditoría.", bullet=True)
+        self.add_p("Barra de Estado Inferior: Muestra el usuario activo, rol, estación Windows, y el indicador visual de sincronización en tiempo real (🟢 Sincronizado, 🟡 Pendiente, 🔴 Offline).", bullet=True)
+        self.add_p("Modales Maximizados: Las ventanas de carga, detalle, búsqueda y administración se abren automáticamente maximizadas para garantizar la visualización completa de datos y tablas sin desplazamientos incómodos.", bullet=True)
 
         self.add_image_placeholder(
-            screen_name="Ventana Principal del Sistema",
-            instructions="Capturar la pantalla principal maximizada mostrando la barra de menús, botones de cambio de vista y la tabla de datos.",
-            figure_desc="Estructura general de la ventana de trabajo de RENO."
+            screen_name="Ventana Principal del Sistema (PySide6)",
+            instructions="Capturar la pantalla principal maximizada mostrando las pestañas de navegación, la barra de herramientas y la tabla de datos.",
+            figure_desc="Estructura general de navegación de RENO v2.0."
         )
 
-        self.add_h2("4.2 Personalización de Temas Visuales")
+        self.add_h2("4.2 Modo Claro y Modo Oscuro")
         self.add_p(
-            "Cada usuario puede personalizar el estilo gráfico según su preferencia o iluminación del puesto de trabajo. "
-            "Diríjase al menú Opciones > Seleccionar Tema y elija entre temas claros (flatly, cosmo, litera, minty) o temas oscuros (darkly, superhero, cyborg). "
-            "La selección se guarda automáticamente en el archivo local 'theme'."
+            "RENO incluye soporte nativo para Tema Claro y Tema Oscuro. El operador puede alternar entre ellos "
+            "desde el menú Opciones > Tema Claro / Tema Oscuro. El ajuste se almacena en la configuración local "
+            "y se mantiene en cada inicio de sesión."
         )
 
         self.add_image_placeholder(
-            screen_name="Selector de Temas Visuales",
-            instructions="Capturar el menú desplegable o ventana de selección de temas de ttkbootstrap.",
-            figure_desc="Menú de personalización de temas visuales de la aplicación."
+            screen_name="Selector de Tema Claro y Oscuro",
+            instructions="Capturar la aplicación en Modo Oscuro mostrando el contraste de tablas y tipografía.",
+            figure_desc="Visualización de la interfaz en modo oscuro de alto contraste."
         )
 
     def _build_section_5_dashboard(self):
@@ -913,9 +934,103 @@ class ManualGenerator:
             figure_desc="Calendario mensual de ciclo con cálculo de descansos reglamentarios y disponibilidad."
         )
 
-    def _build_section_12_export_import(self):
-        self.add_h1("12. Reportes, Descubiertos y Exportación a Excel")
-        self.add_h2("12.1 Exportar a Excel con Filtros Avanzados")
+    def _build_section_12_conocimiento_via(self):
+        self.add_h1("12. Módulo de Conocimiento de Vía por Sector")
+        self.add_p(
+            "El módulo de Conocimiento de Vía ha sido desarrollado especialmente para el Personal de Conducción "
+            "(Conductores y Ayudantes de la Línea Roca). Permite llevar un control riguroso de qué tramos y sectores "
+            "de vía conoce cada agente en ambos sentidos de circulación, asegurando el cumplimiento de los "
+            "vencimientos de convenio colectivo (CCT) a los 2 años calendario y facilitando la asignación de trenes y turnos."
+        )
+        self.add_h2("12.1 Convención Ferroviaria y Catálogo de Sectores")
+        self.add_p(
+            "El sistema adopta la convención operativa de la Línea General Roca con Plaza Constitución (PC) como Km 0:",
+            bold_prefix="Sentidos de marcha:"
+        )
+        self.add_p("▲ Vía Ascendente (ASC): Todo tren o servicio que se aleja de Plaza Constitución km 0 (ej. PC → TY, TY → BO, BO → GW).", bullet=True)
+        self.add_p("▼ Vía Descendente (DESC): Todo tren o servicio que regresa hacia Plaza Constitución (ej. GW → BO, BO → TY, TY → PC).", bullet=True)
+        self.add_p(
+            "El módulo incluye de forma predeterminada los 19 sectores canónicos de la Línea Roca (PC-TY, PC-BZ, BZ-VE, VE-LP, "
+            "BZ-BQ, BQ-GT, GT-VE, TY-BQ, TY-BO, BO-GW, GW-AK, TY-LLV, LLV-MG, MG-ZZ, ZZ-CÑ, TY-HDO, CÑ-MN, CÑ-LB y LP-Univ). "
+            "Los usuarios administradores pueden crear, modificar o reordenar sectores desde el catálogo editable."
+        )
+
+        self.add_h2("12.2 Control de Vencimientos y Semáforo CCT (2 Años)")
+        self.add_p(
+            "Conforme al convenio laboral ferroviario, el conocimiento de un sector tiene una vigencia máxima de dos (2) años. "
+            "La matriz aplica un sistema de semáforo inteligente para prevención de vencimientos:"
+        )
+        self.add_table(
+            headers=["Estado de Vigencia", "Color / Indicador", "Criterio de Evaluación y Acción"],
+            rows_data=[
+                ["Vigente", "🟢 Verde", "Fecha de conocimiento dentro de los 2 años con más de 60 días restantes de vigencia."],
+                ["Alerta preventiva (≤ 60 días)", "🟡 Amarillo", "Faltan entre 31 y 60 días para que venza el conocimiento. Conviene programar viaje de refresco."],
+                ["Alerta crítica (≤ 30 días)", "🟠 Naranja", "Faltan 30 días o menos para el vencimiento. Prioridad alta de programación operativa."],
+                ["Vencido", "🔴 Rojo", "Se superaron los 2 años desde la última fecha registrada. El conductor no debe circular por ese sector."],
+                ["Personal Ayudante", "🔵 Sin alerta", "Para ayudantes de conducción se registra la fecha histórica pero se suprimen alertas de vencimiento."],
+                ["Sin Registro", "— Guión gris", "No existe constancia de conocimiento para el sector y sentido evaluados."],
+            ],
+            col_widths=[1.8, 1.4, 3.0]
+        )
+
+        self.add_image_placeholder(
+            screen_name="Matriz de Conocimiento de Vía",
+            instructions="Capturar la tabla matricial de personal de conducción x sectores con colores de semáforo y filtros superiores.",
+            figure_desc="Matriz interactiva de sectores de vía con alertas de vencimiento CCT a 2 años."
+        )
+
+        self.add_h2("12.3 Carga y Edición Individual de Conocimiento")
+        self.add_p(
+            "Al hacer doble clic sobre cualquier celda de la matriz o seleccionar un agente y presionar '✏️ Registrar / Editar':"
+        )
+        self.add_step(1, "Seleccionar sentidos", "Marque las casillas 'Conocido' para Vía Ascendente, Descendente o ambas con el botón '🔁 Marcar ambos sentidos con la fecha de Ascendente'.")
+        self.add_step(2, "Ingresar fecha", "Indique la fecha en que se realizó el examen de vía, viaje de reconocimiento o servicio.")
+        self.add_step(3, "Observaciones y trazabilidad", "El diálogo muestra el origen previo del registro (manual, turno individual o cálculo masivo) y permite asentar observaciones específicas.")
+        self.add_step(4, "Guardar", "Presione '💾 Guardar'. La matriz se actualiza al instante con los colores y fechas calculadas.")
+
+        self.add_h2("12.4 Autocompletado por Turno Asignado (Individual)")
+        self.add_p(
+            "Permite marcar de forma asistida los sectores que un agente recorre habitualmente según su turno de diagrama:"
+        )
+        self.add_step(1, "Seleccionar agente", "Haga clic sobre el conductor en la tabla y presione el botón '⚡ Autocompletar por Turno'.")
+        self.add_step(2, "Verificar turno e itinerario", "El sistema toma el turno del padrón de empleados y consulta los trenes e itinerarios vigentes.")
+        self.add_step(3, "Previsualizar sectores", "El algoritmo resuelve por grafo (recorrido de estaciones y cabeceras) los tramos ASC y DESC que recorre.")
+        self.add_step(4, "Confirmar observación", "Se genera automáticamente la observación de condición ('Se da como conocida ya que en el itinerario X el personal tenía el turno Y.').")
+        self.add_step(5, "Aplicar", "Presione '⚡ Aplicar Seleccionados' para impactar las fechas.")
+
+        self.add_h2("12.5 Cálculo Masivo para Todo el Personal de Conducción")
+        self.add_p(
+            "Diseñado para grandes actualizaciones de itinerario o diagramas generales. Permite analizar y registrar "
+            "los conocimientos de vía de toda la dotación de conductores y ayudantes en un solo proceso automatizado:",
+            bold_prefix="Función de alta productividad:"
+        )
+        self.add_callout(
+            "Esta operación masiva está protegida y requiere el permiso específico 'conocimiento_via.autocompletar_masivo'. "
+            "Si el usuario activo no cuenta con este permiso en su rol, el botón aparecerá deshabilitado.",
+            title="CONTROL DE SEGURIDAD Y PERMISOS",
+            kind="warn"
+        )
+        self.add_step(1, "Iniciar cálculo masivo", "Presione el botón '⚡⚡ Calcular Todo el Personal' en la barra de herramientas de la matriz.")
+        self.add_step(2, "Definir alcance y filtros", "Elija si desea procesar a 'Todo el personal de conducción' o únicamente al 'Filtro actual' (dotación o especialidad seleccionada).")
+        self.add_step(3, "Seleccionar itinerario y régimen", "Indique el itinerario a consultar (vigente o número de itinerario específico) y régimen (Todos, H, S, D).")
+        self.add_step(4, "Protección de fechas recientes", "Mantenga marcada la casilla 'No sobrescribir conocimientos que ya tengan fecha igual o más reciente'. De esta forma, el sistema protegerá exámenes o viajes más nuevos cargados manualmente.")
+        self.add_step(5, "Plantilla de observación", "Verifique o personalice el comentario que quedará registrado en cada conocimiento. Puede utilizar las variables {itinerario}, {turno}, {regimen} y {trenes}.")
+        self.add_step(6, "Previsualizar y revisar agentes", "La tabla clasifica a cada agente: 'LISTO' (con sectores a registrar), 'SIN CAMBIOS' (si ya posee fechas más recientes) u 'OMITIDO' (con motivo claro: sin turno o turno no encontrado).")
+        self.add_step(7, "Aplicar a seleccionados", "Presione '⚡⚡ Aplicar a Seleccionados'. Todos los registros se guardan en una única transacción atómica con registro en auditoría y cola de sincronización.")
+
+        self.add_image_placeholder(
+            screen_name="Diálogo de Cálculo Masivo de Conocimiento de Vía",
+            instructions="Capturar la ventana de cálculo masivo mostrando los filtros de alcance, itinerario, plantilla de observación y la tabla con los estados de agentes.",
+            figure_desc="Ventana de cálculo masivo de conocimiento de vía por turno para todo el personal."
+        )
+
+        self.add_h2("12.6 Administración del Catálogo de Sectores y Exportación a Excel")
+        self.add_p("Administración de Sectores: Mediante el botón '⚙️ Sectores' (permiso conocimiento_via.administrar) es posible agregar nuevos tramos entre estaciones, definir siglas de cabecera y orden visual.", bullet=True)
+        self.add_p("Exportación a Excel: El botón '📊 Exportar Excel' genera una planilla multihistoria con la matriz completa de personal y sectores, manteniendo las fechas de vía ascendente y descendente.", bullet=True)
+
+    def _build_section_13_export_import(self):
+        self.add_h1("13. Reportes, Descubiertos y Exportación a Excel")
+        self.add_h2("13.1 Exportar a Excel con Filtros Avanzados")
         self.add_p(
             "Permite generar planillas Excel (.xlsx) totalmente formateadas a partir de la base de datos:"
         )
@@ -930,7 +1045,7 @@ class ManualGenerator:
             figure_desc="Diálogo de configuración de exportación de datos a planilla Excel."
         )
 
-        self.add_h2("12.2 Reporte de Turnos Sin Cubrir (Descubiertos)")
+        self.add_h2("13.2 Reporte de Turnos Sin Cubrir (Descubiertos)")
         self.add_p(
             "Diseñado para Jefatura y Coordinación Operativa. Permite obtener un listado específico de todas aquellas "
             "novedades que no tienen cobertura o cuya cobertura es sólo parcial para un período y dotación determinados."
@@ -944,7 +1059,7 @@ class ManualGenerator:
             figure_desc="Generación del informe gerencial de turnos sin cubrir."
         )
 
-        self.add_h2("12.3 Importación Operativa de Planillas")
+        self.add_h2("13.3 Importación Operativa de Planillas")
         self.add_p(
             "RENO permite incorporar masivamente datos desde archivos Excel preexistentes mediante las opciones de Archivo > Importar. "
             "El importador es inteligente y tolera variantes comunes en los nombres de encabezados (ej. 'LEGAJO SAP' o 'LEGAJO')."
@@ -956,13 +1071,13 @@ class ManualGenerator:
             kind="warn"
         )
 
-    def _build_section_13_notificaciones(self):
-        self.add_h1("13. Sistema de Notificaciones y Registros Nuevos")
+    def _build_section_14_notificaciones(self):
+        self.add_h1("14. Sistema de Notificaciones y Registros Nuevos")
         self.add_p(
             "En entornos donde varios puestos de trabajo operan en paralelo, RENO mantiene a los operadores comunicados "
             "sin necesidad de llamadas ni refrescos manuales."
         )
-        self.add_h2("13.1 Menú 'Registros nuevos (N)'")
+        self.add_h2("14.1 Menú 'Registros nuevos (N)'")
         self.add_p(
             "En la barra superior de menús, el contador (N) indica cuántos registros fueron cargados por otras computadoras "
             "desde el último inicio de sesión del usuario activo (excluyendo automáticamente las cargas propias)."
@@ -970,7 +1085,7 @@ class ManualGenerator:
         self.add_p("Al abrir el menú, se despliega la lista con los últimos registros. Al hacer clic en cualquiera de ellos se abre directamente su Detalle.", bullet=True)
         self.add_p("Al consultar el menú, el contador pasa a (0) indicando que fueron revisados, pero el listado permanece disponible durante toda la sesión.", bullet=True)
 
-        self.add_h2("13.2 Notificaciones Flotantes (Toasts)")
+        self.add_h2("14.2 Notificaciones Flotantes (Toasts)")
         self.add_p(
             "Cuando otra computadora guarda una nueva novedad, en la esquina inferior derecha de la pantalla aparece un "
             "aviso flotante no bloqueante (toast) con el resumen del registro. Este aviso se cierra automáticamente "
@@ -983,13 +1098,62 @@ class ManualGenerator:
             figure_desc="Notificaciones flotantes en tiempo real y menú de registros nuevos pendientes de revisión."
         )
 
-    def _build_section_14_administracion(self):
-        self.add_h1("14. Módulo de Administración del Sistema")
+    def _build_section_15_sincronizacion_anillo(self):
+        self.add_h1("15. Sincronización Híbrida en Modo Anillo (SMB ↔ Supabase)")
+        self.add_p(
+            "RENO v2.0 introduce una arquitectura de sincronización de última generación denominada Modo Anillo (Ring Sync), "
+            "diseñada para garantizar la continuidad operativa total aún cuando se produzcan caídas de internet "
+            "o fallas en la red interna compartida de la empresa."
+        )
+        self.add_h2("15.1 Principio de Funcionamiento y Failover Automático")
+        self.add_p(
+            "A diferencia de las aplicaciones cliente-servidor tradicionales que se bloquean cuando pierden conexión, "
+            "RENO opera bajo el paradigma Local-First con doble canal de transporte:",
+            bold_prefix="Topología de Anillo Resiliente:"
+        )
+        self.add_p("Base Local Rápida: Cada equipo lee y escribe de inmediato en su base local SQLite. La interfaz nunca se cuelga ni espera a la red.", bullet=True)
+        self.add_p("Cola Transaccional de Salida (sync_outbox): Cada novedad, cambio de turno, conocimiento de vía o modificación se encola en una tabla transaccional con seguimiento independiente para cada canal.", bullet=True)
+        self.add_p("Canal 1 - Red Compartida (SMB): Transmite cambios hacia y desde la base compartida en la carpeta de red de Windows.", bullet=True)
+        self.add_p("Canal 2 - Nube Supabase (PostgreSQL REST): Sincroniza en tiempo real contra los servicios en la nube de Supabase.", bullet=True)
+        self.add_p("Conmutación Automática (Failover): Si no hay internet, el sistema sincroniza fluidamente por SMB. Si el usuario está fuera de la red de la empresa o no tiene acceso a la carpeta compartida, sincroniza por Supabase.", bullet=True)
+        self.add_p("Puente / Retransmisión sin bucles: Cuando cualquier estación de trabajo tiene acceso simultáneo a ambos medios, actúa automáticamente como puente (relay), llevando los cambios pendientes de la nube a la red local y viceversa sin duplicar registros.", bullet=True)
+
+        self.add_h2("15.2 Indicador Visual de Estado de Sincronización")
+        self.add_p(
+            "En la esquina inferior de la ventana principal, el operador dispone de un semáforo visual en tiempo real "
+            "que indica el estado de la comunicación:"
+        )
+        self.add_table(
+            headers=["Color del Indicador", "Estado Mostrado", "Significado Operativo"],
+            rows_data=[
+                ["🟢 Verde", "Sincronizado", "Todos los cambios locales y remotos se encuentran al día en ambos canales."],
+                ["🟡 Amarillo", "Sincronizando / Pendientes", "Hay paquetes en proceso de envío o recepción. La aplicación está transmitiendo datos."],
+                ["🔴 Rojo / Gris", "Modo Desconectado (Offline)", "No hay acceso a internet ni a la red compartida. Puede seguir operando normalmente; los cambios se enviarán al reconectar."],
+            ],
+            col_widths=[1.5, 2.2, 2.5]
+        )
+
+        self.add_h2("15.3 Diagnóstico y Sincronización Forzada")
+        self.add_p(
+            "Haciendo clic sobre el indicador de estado o desde Administración > Sincronización se accede al panel de diagnóstico:"
+        )
+        self.add_step(1, "Verificar latencia", "Compruebe los tiempos de respuesta de SMB y de Supabase en milisegundos.")
+        self.add_step(2, "Revisar cola de salida", "Muestra cuántos eventos pendientes restan sincronizar en cada canal.")
+        self.add_step(3, "Forzar sincronización inmediata", "Presione 'Sincronizar ahora' para forzar una sincronización completa en ese instante.")
+
+        self.add_image_placeholder(
+            screen_name="Panel de Diagnóstico de Sincronización",
+            instructions="Capturar la ventana de estado de sincronización mostrando los canales SMB y Supabase y el botón 'Sincronizar ahora'.",
+            figure_desc="Monitor de sincronización híbrida multicanal y diagnóstico de red."
+        )
+
+    def _build_section_16_administracion(self):
+        self.add_h1("16. Módulo de Administración del Sistema")
         self.add_p(
             "El menú Administración centraliza todas las herramientas de control y configuración. "
             "Solo es visible si el usuario tiene asignados roles de gestión."
         )
-        self.add_h2("14.1 Gestión de Usuarios")
+        self.add_h2("16.1 Gestión de Usuarios")
         self.add_p("Permite dar de alta cuentas, asociarles un rol, cambiar estados (activo/inactivo) y blanquear claves de acceso.")
 
         self.add_image_placeholder(
@@ -998,10 +1162,10 @@ class ManualGenerator:
             figure_desc="Ventana de administración y control de usuarios del sistema."
         )
 
-        self.add_h2("14.2 Roles y Matriz Visual de Permisos")
+        self.add_h2("16.2 Roles y Matriz Visual de Permisos")
         self.add_p(
-            "El editor de roles agrupa los permisos por módulos temáticos (Novedades, Cambios, Empleados, Reemplazos, etc.). "
-            "Cuenta con un buscador rápido y botones 'Todos' y 'Ninguno' para facilitar asignaciones masivas con total precisión."
+            "El editor de roles agrupa los permisos por módulos temáticos (Novedades, Cambios, Empleados, Reemplazos, "
+            "Conocimiento de Vía, etc.). Cuenta con un buscador rápido y botones 'Todos' y 'Ninguno' para facilitar asignaciones masivas con total precisión."
         )
 
         self.add_image_placeholder(
@@ -1010,7 +1174,7 @@ class ManualGenerator:
             figure_desc="Asignación granular de permisos agrupados por módulo funcional."
         )
 
-        self.add_h2("14.3 Gestión Integral de Empleados (BASE)")
+        self.add_h2("16.3 Gestión Integral de Empleados (BASE)")
         self.add_p(
             "Permite administrar el padrón maestro del personal. La tabla incorpora filtros dinámicos por Dotación, "
             "Especialidad y búsqueda por Nombre/Legajo. Al dar de alta o editar un empleado se configuran: "
@@ -1024,21 +1188,25 @@ class ManualGenerator:
             figure_desc="Padrón maestro de empleados y configuración de jornadas de ciclo."
         )
 
-        self.add_h2("14.4 Catálogos del Sistema")
+        self.add_h2("16.4 Catálogos Operativos")
         self.add_p(
             "Administra las listas desplegables utilizadas en los formularios:"
         )
         self.add_p("Tipos de Novedad: Define la descripción, días de duración predeterminada y si entra en el reporte de turnos sin cubrir.", bullet=True)
         self.add_p("Dotaciones: Catálogo de bases y cabeceras operativas.", bullet=True)
-        self.add_p("Personal de Estación: Catálogo de jefes y referentes asignados a cada estación, con soporte para importar y exportar a Excel.", bullet=True)
+        self.add_p("Personal de Estación: Catálogo de referentes por estación, con soporte para importar y exportar a Excel.", bullet=True)
 
-        self.add_h2("14.5 Destinatarios de Informes y Alertas")
-        self.add_p("Define las direcciones de correo electrónico que reciben automáticamente los informes de novedades vía Outlook.")
+        self.add_h2("16.5 Catálogo de Sectores de Vía, Turnos e Itinerarios")
+        self.add_p("Sectores de Vía: ABM completo de los tramos de la red, definición de cabeceras de origen y destino para sentido ASC/DESC.", bullet=True)
+        self.add_p("Turnos de Itinerario: Carga de turnos de servicio, regímenes (H, S, D), vueltas de trenes y paradas intermedias para cálculo automático de recorridos.", bullet=True)
 
-        self.add_h2("14.6 Tiempos de Edición, Sesión y Apariencia")
+        self.add_h2("16.6 Destinatarios de Informes y Ordenamientos")
+        self.add_p("Define las direcciones de correo electrónico separadas que reciben automáticamente los informes diarios y ordenamientos operativos vía Outlook.")
+
+        self.add_h2("16.7 Tiempos de Edición, Sesión y Apariencia")
         self.add_p("Configura los minutos de inactividad de sesión, las horas límite para editar (24h) y eliminar (72h), y la altura en píxeles de las filas de las tablas.")
 
-        self.add_h2("14.7 Registros Eliminados (Papelera)")
+        self.add_h2("16.8 Registros Eliminados (Papelera)")
         self.add_p("Permite consultar el histórico de registros dados de baja y recuperarlos con un solo clic o eliminarlos de manera permanente.")
 
         self.add_image_placeholder(
@@ -1047,7 +1215,7 @@ class ManualGenerator:
             figure_desc="Recuperación y depuración de registros en la papelera del sistema."
         )
 
-        self.add_h2("14.8 Copias de Seguridad (Backups)")
+        self.add_h2("16.9 Copias de Seguridad (Backups)")
         self.add_p(
             "RENO realiza un respaldo automático diario de la base de datos SQLite al iniciar la aplicación, "
             "conservando las últimas N copias configuradas (por defecto 10). Desde esta ventana también es posible "
@@ -1060,10 +1228,10 @@ class ManualGenerator:
             figure_desc="Módulo de respaldo y restauración de bases de datos."
         )
 
-        self.add_h2("14.9 Auditoría de Eventos")
+        self.add_h2("16.10 Auditoría de Eventos")
         self.add_p(
             "Bitácora inalterable que registra cada acción realizada en el sistema: usuario, acción (alta, modificación, "
-            "borrado, exportación, login), tabla afectada, fecha y hora exacta, y estación Windows interviniente."
+            "borrado, exportación, login, autocompletar masivo), entidad afectada, fecha y hora exacta, y estación Windows interviniente."
         )
 
         self.add_image_placeholder(
@@ -1072,41 +1240,45 @@ class ManualGenerator:
             figure_desc="Historial de auditoría para trazabilidad de operaciones."
         )
 
-    def _build_section_15_faq(self):
-        self.add_h1("15. Preguntas Frecuentes y Solución de Problemas")
+    def _build_section_17_faq(self):
+        self.add_h1("17. Preguntas Frecuentes y Solución de Problemas")
         self.add_table(
             headers=["Mensaje / Situación", "Causa Probable", "Solución Recomendada"],
             rows_data=[
                 ["'La base está siendo utilizada por otra PC. Intente nuevamente.'", "Otra computadora está grabando un registro simultáneamente.", "Aguarde unos 5 a 10 segundos y vuelva a presionar Guardar. Las transacciones son ultrarrápidas."],
+                ["¿Qué ocurre si se corta la conexión a internet?", "Falla en el proveedor de internet externo.", "RENO sigue funcionando sin interrupción a través de la carpeta compartida en red local (SMB). Los datos se sincronizan con la nube automáticamente al retornar la conexión."],
+                ["¿Qué ocurre si no tengo acceso a la carpeta compartida de red?", "Equipo conectado de forma remota o fuera de la sede.", "RENO sincroniza a través de Supabase en la nube. Al ingresar a la red interna, el anillo retransmitirá los cambios."],
+                ["El botón '⚡⚡ Calcular Todo el Personal' aparece deshabilitado.", "El usuario no cuenta con el permiso específico.", "Solicite a un administrador que asigne el permiso 'conocimiento_via.autocompletar_masivo' a su rol en Administración > Roles."],
+                ["¿Cómo proteger exámenes manuales recientes al hacer cálculo masivo de vías?", "Mapeo general de turnos que podría tener fecha anterior.", "Mantenga marcada la casilla 'No sobrescribir conocimientos que ya tengan fecha igual o más reciente'. El sistema respetará las fechas más nuevas."],
                 ["No veo el menú Administración en la barra superior.", "Su usuario actual no posee permisos administrativos.", "Solicite a un administrador que asigne el rol o permisos correspondientes a su cuenta."],
                 ["No puedo editar o eliminar un registro.", "Superó las 24 horas (edición) o 72 horas (eliminación).", "Los usuarios con rol de Administrador o Jefatura (permiso registros.modificar) pueden modificarlo sin límite de tiempo."],
-                ["No aparece un registro cargado en otra PC.", "El ciclo de refresco automático es de 60 segundos.", "Espere unos instantes o revise el menú 'Registros nuevos (N)' para ver las últimas incorporaciones."],
                 ["Advertencia: 'No se pudo enviar el informe por Outlook'.", "El cliente Outlook no está configurado o está cerrado.", "El registro quedó guardado correctamente en la base. Abra Outlook para restablecer los envíos futuros."],
                 ["La aplicación no inicia o da error de base de datos.", "Ruta en 'path_base' incorrecta o carpeta de red desconectada.", "Verifique que la unidad de red compartida esté conectada en Windows y accesible."],
             ],
             col_widths=[1.8, 2.0, 2.5]
         )
 
-    def _build_section_16_anexo_permisos(self):
-        self.add_h1("16. Anexo: Matriz de Permisos por Rol")
+    def _build_section_18_anexo_permisos(self):
+        self.add_h1("18. Anexo: Matriz de Permisos por Rol")
         self.add_p(
-            "A continuación se detalla la nómina de permisos que pueden asignarse a los distintos perfiles de usuario:"
+            "A continuación se detalla la nómina completa de permisos del sistema que pueden asignarse a los distintos perfiles de usuario:"
         )
         self.add_table(
             headers=["Módulo", "Acciones Disponibles", "Descripción Operativa"],
             rows_data=[
                 ["Novedades", "ver, crear, editar, eliminar, importar, exportar", "Gestión operativa de las novedades del personal."],
                 ["Cambios de Turno", "ver, crear, editar, eliminar, importar, exportar", "Gestión operativa de las permutas de servicio."],
+                ["Ordenamientos", "ver, crear, editar, eliminar, exportar", "Emisión y control de órdenes operativas diarias."],
                 ["Registros (Global)", "modificar, recuperar", "Edición y borrado sin límite de tiempo; acceso a la papelera."],
                 ["Reemplazos (Ciclo)", "ver, asignar", "Visualización del módulo de ciclo y asignación de tramos y descansos."],
-                ["Empleados", "ver, crear, editar, eliminar, importar, administrar", "Padrón general del personal y datos de CCT."],
-                ["Personal Estación", "ver, crear, editar, eliminar, importar, exportar", "Catálogo de personal de referencia por estación."],
-                ["Tipos de Novedad", "administrar", "Configuración de catálogo, días predeterminados y descubiertos."],
-                ["Dotaciones", "administrar", "Catálogo de bases y dependencias."],
-                ["Usuarios y Roles", "administrar", "Creación de cuentas, blanqueo y asignación de permisos."],
-                ["Sesión y Tiempos", "configurar", "Límites de inactividad, ventanas de tiempo y contraseñas."],
-                ["Backups", "gestionar", "Creación y restauración de copias de seguridad de la base."],
-                ["Auditoría", "ver", "Consulta del historial de acciones y seguridad."],
+                ["Conocimiento de Vía", "ver, editar, autocompletar_masivo, administrar", "Matriz de sectores, autocompletado por turno, cálculo masivo para todo el personal y catálogo de sectores."],
+                ["Turnos e Itinerarios", "ver, crear, editar, eliminar, importar, exportar", "Catálogo de turnos por itinerario, vueltas y paradas."],
+                ["Empleados", "administrar, importar", "Padrón general del personal, dotaciones y datos de CCT."],
+                ["Personal Estación", "ver, crear, editar, importar, exportar", "Catálogo de personal de referencia por estación."],
+                ["Catálogos Operativos", "dotaciones.administrar, tiposNovedad.administrar", "Configuración de dotaciones, tipos de novedad y descubiertos."],
+                ["Destinatarios Correo", "destinatarios_informe.administrar, destinatarios_ordenamiento.administrar", "Gestión de listas de distribución de emails."],
+                ["Usuarios y Roles", "usuarios.administrar, roles.administrar", "Creación de cuentas, blanqueo y asignación de permisos."],
+                ["Seguridad y Sistema", "sesion.configurar, auditoria.ver, backup.gestionar", "Límites de inactividad, copias de seguridad y auditoría."],
             ],
             col_widths=[1.5, 2.3, 2.5]
         )
