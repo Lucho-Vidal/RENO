@@ -248,61 +248,25 @@ class ConocimientoViaView(QWidget):
         # 1. Barra de acciones y filtros
         top_frame = QFrame()
         top_frame.setObjectName("filterBar")
-        top_lay = QHBoxLayout(top_frame)
-        top_lay.setContentsMargins(8, 4, 8, 4)
-        top_lay.setSpacing(8)
+        top_vlay = QVBoxLayout(top_frame)
+        top_vlay.setContentsMargins(8, 6, 8, 6)
+        top_vlay.setSpacing(6)
 
-        top_lay.addWidget(QLabel("Dotación:"))
-        self.combo_dot = QComboBox()
-        self.combo_dot.addItem("Todas")
-        for d in self.records_service.listar_dotaciones(incluir_inactivos=False):
-            self.combo_dot.addItem(d["nombre"])
-        self.combo_dot.currentIndexChanged.connect(self.consultar)
-        top_lay.addWidget(self.combo_dot)
-
-        top_lay.addWidget(QLabel("Especialidad:"))
-        self.combo_esp = QComboBox()
-        self.combo_esp.addItem("Todas")
-        self.combo_esp.currentIndexChanged.connect(self.consultar)
-        top_lay.addWidget(self.combo_esp)
-
-        top_lay.addWidget(QLabel("Estado:"))
-        self.combo_estado = QComboBox()
-        self.combo_estado.addItems([
-            "Todos",
-            "Con vencidos",
-            "Por vencer (≤ 30 días)",
-            "Por vencer (≤ 60 días)",
-            "Solo vigentes",
-            "Sin registros",
-        ])
-        self.combo_estado.currentIndexChanged.connect(self._aplicar_filtros_locales)
-        top_lay.addWidget(self.combo_estado)
-
-        top_lay.addWidget(QLabel("Buscar:"))
-        self.txt_search = QLineEdit()
-        self.txt_search.setPlaceholderText("Legajo, nombre, turno...")
-        self.txt_search.setClearButtonEnabled(True)
-        self.txt_search.setFixedWidth(185)
-        self.txt_search.textChanged.connect(self._on_search_changed)
-        top_lay.addWidget(self.txt_search)
-
-        self.btn_actualizar = QPushButton("🔍 Actualizar")
-        self.btn_actualizar.clicked.connect(self.consultar)
-        top_lay.addWidget(self.btn_actualizar)
-
-        top_lay.addStretch()
+        # Fila 1: Acciones principales
+        actions_lay = QHBoxLayout()
+        actions_lay.setContentsMargins(0, 0, 0, 0)
+        actions_lay.setSpacing(8)
 
         self.btn_editar = QPushButton("✏️ Registrar / Editar")
         self.btn_editar.setEnabled(self._can("conocimiento_via.editar"))
         self.btn_editar.clicked.connect(self._editar_seleccion)
-        top_lay.addWidget(self.btn_editar)
+        actions_lay.addWidget(self.btn_editar)
 
         self.btn_autocompletar = QPushButton("⚡ Autocompletar por Turno")
         self.btn_autocompletar.setObjectName("btnSecondary")
         self.btn_autocompletar.setEnabled(self._can("conocimiento_via.editar"))
         self.btn_autocompletar.clicked.connect(self._autocompletar_por_turno)
-        top_lay.addWidget(self.btn_autocompletar)
+        actions_lay.addWidget(self.btn_autocompletar)
 
         puede_masivo = self._can("conocimiento_via.autocompletar_masivo")
         self.btn_autocompletar_masivo = QPushButton("⚡⚡ Calcular Todo el Personal")
@@ -314,18 +278,69 @@ class ConocimientoViaView(QWidget):
             else "Requiere el permiso 'conocimiento_via.autocompletar_masivo'."
         )
         self.btn_autocompletar_masivo.clicked.connect(self._autocompletar_masivo)
-        top_lay.addWidget(self.btn_autocompletar_masivo)
+        actions_lay.addWidget(self.btn_autocompletar_masivo)
 
         self.btn_sectores = QPushButton("⚙️ Sectores")
         self.btn_sectores.setObjectName("btnSecondary")
         self.btn_sectores.setEnabled(self._can("conocimiento_via.administrar"))
         self.btn_sectores.clicked.connect(self._administrar_sectores)
-        top_lay.addWidget(self.btn_sectores)
+        actions_lay.addWidget(self.btn_sectores)
+
+        actions_lay.addStretch()
 
         self.btn_excel = QPushButton("📊 Exportar Excel")
         self.btn_excel.setObjectName("btnSecondary")
         self.btn_excel.clicked.connect(self._exportar_excel)
-        top_lay.addWidget(self.btn_excel)
+        actions_lay.addWidget(self.btn_excel)
+
+        top_vlay.addLayout(actions_lay)
+
+        # Fila 2: Filtros y búsqueda
+        filters_lay = QHBoxLayout()
+        filters_lay.setContentsMargins(0, 0, 0, 0)
+        filters_lay.setSpacing(8)
+
+        filters_lay.addWidget(QLabel("Dotación:"))
+        self.combo_dot = QComboBox()
+        self.combo_dot.addItem("Todas")
+        for d in self.records_service.listar_dotaciones(incluir_inactivos=False):
+            self.combo_dot.addItem(d["nombre"])
+        self.combo_dot.currentIndexChanged.connect(self.consultar)
+        filters_lay.addWidget(self.combo_dot)
+
+        filters_lay.addWidget(QLabel("Especialidad:"))
+        self.combo_esp = QComboBox()
+        self.combo_esp.addItem("Todas")
+        self.combo_esp.currentIndexChanged.connect(self.consultar)
+        filters_lay.addWidget(self.combo_esp)
+
+        filters_lay.addWidget(QLabel("Estado:"))
+        self.combo_estado = QComboBox()
+        self.combo_estado.addItems([
+            "Todos",
+            "Con vencidos",
+            "Por vencer (≤ 30 días)",
+            "Por vencer (≤ 60 días)",
+            "Solo vigentes",
+            "Sin registros",
+        ])
+        self.combo_estado.currentIndexChanged.connect(self._aplicar_filtros_locales)
+        filters_lay.addWidget(self.combo_estado)
+
+        filters_lay.addWidget(QLabel("Buscar:"))
+        self.txt_search = QLineEdit()
+        self.txt_search.setPlaceholderText("Legajo, nombre, turno...")
+        self.txt_search.setClearButtonEnabled(True)
+        self.txt_search.setFixedWidth(185)
+        self.txt_search.textChanged.connect(self._on_search_changed)
+        filters_lay.addWidget(self.txt_search)
+
+        self.btn_actualizar = QPushButton("🔍 Actualizar")
+        self.btn_actualizar.clicked.connect(self.consultar)
+        filters_lay.addWidget(self.btn_actualizar)
+
+        filters_lay.addStretch()
+        top_vlay.addLayout(filters_lay)
 
         layout.addWidget(top_frame)
 

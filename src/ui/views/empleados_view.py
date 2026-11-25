@@ -69,93 +69,106 @@ class EmpleadosView(QWidget):
         # 1. Barra de herramientas superior
         bar_frame = QFrame()
         bar_frame.setObjectName("filterBar")
-        bar = QHBoxLayout(bar_frame)
-        bar.setContentsMargins(8, 6, 8, 6)
-        bar.setSpacing(10)
+        bar_vlay = QVBoxLayout(bar_frame)
+        bar_vlay.setContentsMargins(8, 6, 8, 6)
+        bar_vlay.setSpacing(6)
+
+        # Fila 1: Acciones
+        actions_lay = QHBoxLayout()
+        actions_lay.setContentsMargins(0, 0, 0, 0)
+        actions_lay.setSpacing(10)
 
         self.btn_nuevo = QPushButton("➕ Nuevo Empleado")
         self.btn_nuevo.setEnabled(puede_admin)
         self.btn_nuevo.clicked.connect(self._nuevo_empleado)
-        bar.addWidget(self.btn_nuevo)
+        actions_lay.addWidget(self.btn_nuevo)
 
         self.btn_editar = QPushButton("✏️ Modificar")
         self.btn_editar.setObjectName("btnSecondary")
         self.btn_editar.setEnabled(puede_admin)
         self.btn_editar.clicked.connect(self._modificar_empleado)
-        bar.addWidget(self.btn_editar)
+        actions_lay.addWidget(self.btn_editar)
 
         self.btn_toggle = QPushButton("🔄 Activar / Desactivar")
         self.btn_toggle.setObjectName("btnSecondary")
         self.btn_toggle.setEnabled(puede_admin)
         self.btn_toggle.clicked.connect(self._toggle_estado)
-        bar.addWidget(self.btn_toggle)
+        actions_lay.addWidget(self.btn_toggle)
 
         sep1 = QFrame()
         sep1.setFrameShape(QFrame.VLine)
         sep1.setFrameShadow(QFrame.Sunken)
-        bar.addWidget(sep1)
+        actions_lay.addWidget(sep1)
+
+        self.btn_historial_turnos = QPushButton("📜 Historial de Turnos")
+        self.btn_historial_turnos.setObjectName("btnSecondary")
+        self.btn_historial_turnos.clicked.connect(self._abrir_historial_turnos)
+        actions_lay.addWidget(self.btn_historial_turnos)
+
+        self.btn_remociones = QPushButton("🔄 Remociones")
+        self.btn_remociones.setObjectName("btnSecondary")
+        self.btn_remociones.setEnabled(puede_admin)
+        actions_lay.addWidget(self.btn_remociones)
+
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.VLine)
+        sep2.setFrameShadow(QFrame.Sunken)
+        actions_lay.addWidget(sep2)
 
         self.btn_importar = QPushButton("📥 Importar Excel")
         self.btn_importar.setObjectName("btnSecondary")
         self.btn_importar.setEnabled(puede_admin)
         self.btn_importar.clicked.connect(self._importar_excel)
-        bar.addWidget(self.btn_importar)
+        actions_lay.addWidget(self.btn_importar)
 
         self.btn_exportar = QPushButton("📊 Exportar Excel")
         self.btn_exportar.setObjectName("btnSecondary")
         self.btn_exportar.clicked.connect(self._exportar_excel)
-        bar.addWidget(self.btn_exportar)
+        actions_lay.addWidget(self.btn_exportar)
 
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.VLine)
-        sep2.setFrameShadow(QFrame.Sunken)
-        bar.addWidget(sep2)
+        actions_lay.addStretch()
+        bar_vlay.addLayout(actions_lay)
 
-        self.btn_historial_turnos = QPushButton("📜 Historial de Turnos")
-        self.btn_historial_turnos.setObjectName("btnSecondary")
-        self.btn_historial_turnos.clicked.connect(self._abrir_historial_turnos)
-        bar.addWidget(self.btn_historial_turnos)
-
-        self.btn_remociones = QPushButton("🔄 Remociones")
-        self.btn_remociones.setObjectName("btnSecondary")
-        self.btn_remociones.setEnabled(puede_admin)
-        self.btn_remociones.clicked.connect(self._abrir_remociones)
-        bar.addWidget(self.btn_remociones)
-
-        bar.addStretch()
+        # Fila 2: Filtros
+        filters_lay = QHBoxLayout()
+        filters_lay.setContentsMargins(0, 0, 0, 0)
+        filters_lay.setSpacing(10)
 
         # Filtro de Dotación
-        bar.addWidget(QLabel("Dotación:"))
+        filters_lay.addWidget(QLabel("Dotación:"))
         self.combo_dotacion = QComboBox()
         self.combo_dotacion.addItem("Todas")
         dots = self.records_service.listar_dotaciones(incluir_inactivos=False)
         for d in dots:
             self.combo_dotacion.addItem(d["nombre"])
         self.combo_dotacion.currentIndexChanged.connect(self._on_filtro_changed)
-        bar.addWidget(self.combo_dotacion)
+        filters_lay.addWidget(self.combo_dotacion)
 
         # Filtro de Especialidad
-        bar.addWidget(QLabel("Especialidad:"))
+        filters_lay.addWidget(QLabel("Especialidad:"))
         self.combo_esp = QComboBox()
         self.combo_esp.addItem("Todas")
         for esp in self.records_service.listar_especialidades_empleados():
             self.combo_esp.addItem(esp)
         self.combo_esp.currentIndexChanged.connect(self._on_filtro_changed)
-        bar.addWidget(self.combo_esp)
+        filters_lay.addWidget(self.combo_esp)
 
         # Filtro de Búsqueda Rápida
-        bar.addWidget(QLabel("Buscar:"))
+        filters_lay.addWidget(QLabel("Buscar:"))
         self.txt_search = QLineEdit()
         self.txt_search.setPlaceholderText("Legajo o apellido...")
         self.txt_search.textChanged.connect(self._on_search)
         self.txt_search.setFixedWidth(160)
-        bar.addWidget(self.txt_search)
+        filters_lay.addWidget(self.txt_search)
 
         # Checkbox Inactivos
         self.chk_inactivos = QCheckBox("Ver Inactivos")
         self.chk_inactivos.setChecked(True)
         self.chk_inactivos.toggled.connect(self.recargar)
-        bar.addWidget(self.chk_inactivos)
+        filters_lay.addWidget(self.chk_inactivos)
+
+        filters_lay.addStretch()
+        bar_vlay.addLayout(filters_lay)
 
         layout.addWidget(bar_frame)
 

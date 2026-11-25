@@ -386,10 +386,17 @@ class VerificarActualizacionWorker(QThread):
     sistema_actualizado = Signal()
     error_verificacion = Signal(str)
 
-    def __init__(self, version_local: str = APP_VERSION, config: dict[str, Any] | None = None, parent: QObject | None = None):
+    def __init__(
+        self,
+        version_local: str = APP_VERSION,
+        config: dict[str, Any] | None = None,
+        parent: QObject | None = None,
+        silencioso: bool = False,
+    ):
         super().__init__(parent)
         self.version_local = version_local
         self.config = config if config is not None else cargar_configuracion_app()
+        self.silencioso = silencioso
 
     def run(self) -> None:
         candidatos_url = resolver_url_manifiesto(self.config)
@@ -398,7 +405,10 @@ class VerificarActualizacionWorker(QThread):
                 "No hay URL de actualizaciones (OTA) ni URL de Supabase configurada. "
                 "Configure la URL en Administración > Configuración > Actualizaciones (OTA)."
             )
-            logger.warning(msg_vacio)
+            if self.silencioso:
+                logger.debug(msg_vacio)
+            else:
+                logger.warning(msg_vacio)
             self.error_verificacion.emit(msg_vacio)
             return
 

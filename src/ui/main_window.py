@@ -65,6 +65,7 @@ from src.ui.views.dialogs.sincronizacion_config_dialog import SincronizacionConf
 from src.services.updater_service import (
     InfoActualizacion,
     VerificarActualizacionWorker,
+    resolver_url_manifiesto,
 )
 from src.ui.views.dialogs.admin_dialogs import (
     AdminAuditoriaDialog,
@@ -1175,11 +1176,14 @@ class MainWindow(QMainWindow):
         if not cfg.get("updater_auto_check", True):
             logger.debug("Verificación automática de actualizaciones deshabilitada por configuración.")
             return
+        if not resolver_url_manifiesto(cfg):
+            logger.debug("Verificación silenciosa de OTA omitida: No hay URL de actualizaciones configurada.")
+            return
         self._ultima_config_updater = cfg
         if getattr(self, "_worker_updater", None) is not None:
             desvincular_worker_seguro(self._worker_updater, timeout_ms=200, cancelar=True)
             self._worker_updater = None
-        self._worker_updater = VerificarActualizacionWorker(config=cfg, parent=self)
+        self._worker_updater = VerificarActualizacionWorker(config=cfg, parent=self, silencioso=True)
         self._worker_updater.actualizacion_disponible.connect(self._on_actualizacion_disponible_silenciosa)
         self._worker_updater.start()
 
