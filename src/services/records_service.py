@@ -113,12 +113,14 @@ class RecordsService:
         payload: Optional[Dict[str, Any]] = None,
     ) -> None:
         conn.execute(
-            """INSERT INTO sync_outbox (tabla, registro_pk, operacion, payload_json, creado_en)
-               VALUES (?, ?, ?, ?, ?)
+            """INSERT INTO sync_outbox (tabla, registro_pk, operacion, payload_json, creado_en, synced_smb, synced_supabase)
+               VALUES (?, ?, ?, ?, ?, 0, 0)
                ON CONFLICT(tabla, registro_pk) DO UPDATE SET
                    operacion = excluded.operacion,
                    payload_json = excluded.payload_json,
-                   creado_en = excluded.creado_en""",
+                   creado_en = excluded.creado_en,
+                   synced_smb = 0,
+                   synced_supabase = 0""",
             (
                 tabla,
                 str(registro_id),
@@ -4302,12 +4304,14 @@ class RecordsService:
             for rid in ids
         ]
         conn.executemany(
-            """INSERT INTO sync_outbox (tabla, registro_pk, operacion, payload_json, creado_en)
-               VALUES (?, ?, ?, ?, ?)
+            """INSERT INTO sync_outbox (tabla, registro_pk, operacion, payload_json, creado_en, synced_smb, synced_supabase)
+               VALUES (?, ?, ?, ?, ?, 0, 0)
                ON CONFLICT(tabla, registro_pk) DO UPDATE SET
                    operacion = excluded.operacion,
                    payload_json = excluded.payload_json,
-                   creado_en = excluded.creado_en""",
+                   creado_en = excluded.creado_en,
+                   synced_smb = 0,
+                   synced_supabase = 0""",
             rows_sync,
         )
 

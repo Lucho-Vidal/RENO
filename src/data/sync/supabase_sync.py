@@ -90,15 +90,35 @@ class SupabaseSyncEngine:
         self.supabase_key = supabase_key
         self._lock = threading.Lock()
 
-    def sincronizar_completo(self) -> tuple[int, int]:
+    def sincronizar_completo(
+        self,
+        modo_anillo: bool = False,
+        propagar_a_canal_opuesto: bool = False,
+    ) -> tuple[int, int]:
         """Ejecuta ciclo completo de sincronización (push + pull)."""
-        return self.sincronizar(solo_push=False, solo_pull=False)
+        return self.sincronizar(
+            solo_push=False,
+            solo_pull=False,
+            modo_anillo=modo_anillo,
+            propagar_a_canal_opuesto=propagar_a_canal_opuesto,
+        )
 
-    def sincronizar(self, solo_push: bool = False, solo_pull: bool = False) -> tuple[int, int]:
+    def sincronizar(
+        self,
+        solo_push: bool = False,
+        solo_pull: bool = False,
+        modo_anillo: bool = False,
+        propagar_a_canal_opuesto: bool = False,
+    ) -> tuple[int, int]:
         if not self._lock.acquire(blocking=False):
             return 0, 0
         try:
-            return self._ejecutar_sync(solo_push=solo_push, solo_pull=solo_pull)
+            return self._ejecutar_sync(
+                solo_push=solo_push,
+                solo_pull=solo_pull,
+                modo_anillo=modo_anillo,
+                propagar_a_canal_opuesto=propagar_a_canal_opuesto,
+            )
         finally:
             self._lock.release()
 
@@ -145,7 +165,13 @@ class SupabaseSyncEngine:
                 logger.warning("Excepción al vaciar %s: %s", tabla, ex)
         return vaciadas
 
-    def _ejecutar_sync(self, solo_push: bool = False, solo_pull: bool = False) -> tuple[int, int]:
+    def _ejecutar_sync(
+        self,
+        solo_push: bool = False,
+        solo_pull: bool = False,
+        modo_anillo: bool = False,
+        propagar_a_canal_opuesto: bool = False,
+    ) -> tuple[int, int]:
         cfg = cargar_configuracion_app()
         url_base = sanitizar_supabase_url(self.supabase_url or cfg.get("supabase_url"))
         anon_key = (self.supabase_key or cfg.get("supabase_anon_key") or "").strip()
@@ -170,7 +196,10 @@ class SupabaseSyncEngine:
             iteracion = 0
             while iteracion < 100:
                 iteracion += 1
-                pendientes = self.outbox.obtener_pendientes(limite=200)
+                pendientes = self.outbox.obtener_pendientes(
+                    limite=200,
+                    canal="supabase" if modo_anillo else None,
+                )
                 if not pendientes:
                     break
 
@@ -384,7 +413,10 @@ class SupabaseSyncEngine:
                             except Exception as ex:
                                 self.outbox.registrar_fallo(outbox_id, str(ex))
 
-                self.outbox.eliminar_procesados(ids_a_eliminar)
+                if modo_anillo:
+                    self.outbox.marcar_entregado_canal(ids_a_eliminar, "supabase")
+                else:
+                    self.outbox.eliminar_procesados(ids_a_eliminar)
 
                 if not ids_a_eliminar:
                     # Si no hubo progreso en esta tanda, detener para evitar bucle
@@ -430,6 +462,9 @@ class SupabaseSyncEngine:
                 ("reno_ciclo_jornadas", "ciclo_jornadas", "legajo,fecha"),
             ]
 
+            errores_pull = 0
+            ultimo_error_pull: Exception | None = None
+
             with self.db.write_transaction() as conn:
                 for remota, local, pk_fld in tablas_pull:
                     endpoint_pull = f"{url_base}/rest/v1/{remota}?select=*"
@@ -458,7 +493,7 @@ class SupabaseSyncEngine:
                                 # Anti-colisión en novedades por ID
                                 if local == "novedades":
                                     row_loc = conn.execute(
-                                        "SELECT legajo, fecha_inicio, sync_status FROM novedades WHERE id = ?;",
+                                        "SELECT legajo, fecha_inicio, sync_status, updated_at FROM novedades WHERE id = ?;",
                                         (r["id"],),
                                     ).fetchone()
                                     if row_loc and row_loc["sync_status"] == "pending":
@@ -471,6 +506,7 @@ class SupabaseSyncEngine:
                                         else:
                                             continue
 
+                                    upd_val = r.get("updated_at") or ahora_iso
                                     conn.execute(
                                         """INSERT OR REPLACE INTO novedades
                                            (id, registrado_en, legajo, apellidos_nombres, especialidad, dotacion,
@@ -483,24 +519,27 @@ class SupabaseSyncEngine:
                                             r.get("franco", ""), r["novedad"], r["fecha_inicio"], r.get("fecha_fin"),
                                             r.get("referencia_estacion", ""), r.get("supervisor", ""), r.get("observaciones"),
                                             r.get("usuario_windows"), r.get("usuario_id"), 1 if r.get("activo", True) else 0,
-                                            r.get("updated_at") or ahora_iso,
+                                            upd_val,
                                         ),
                                     )
+                                    if propagar_a_canal_opuesto:
+                                        cambio_real = row_loc is None or str(row_loc["updated_at"] or "") != str(upd_val)
+                                        if cambio_real:
+                                            OutboxQueue.encolar_puente(conn, "novedades", str(r["id"]), r, canal_origen="supabase")
                                     continue
 
                                 # Upsert genérico para las demás 9 tablas sincronizables
                                 if not all(r.get(c) is not None for c in pk_cols):
                                     continue
-                                if "sync_status" in cols_set:
-                                    where_pk = " AND ".join(f"{c} = ?" for c in pk_cols)
-                                    vals_pk = tuple(r[c] for c in pk_cols)
-                                    existente = conn.execute(
-                                        f"SELECT sync_status FROM {local} WHERE {where_pk} LIMIT 1;",
-                                        vals_pk,
-                                    ).fetchone()
-                                    if existente and existente["sync_status"] == "pending":
-                                        # Respetar cambios locales pendientes de subir
-                                        continue
+                                where_pk = " AND ".join(f"{c} = ?" for c in pk_cols)
+                                vals_pk = tuple(r[c] for c in pk_cols)
+                                existente = conn.execute(
+                                    f"SELECT * FROM {local} WHERE {where_pk} LIMIT 1;",
+                                    vals_pk,
+                                ).fetchone()
+                                if existente and "sync_status" in cols_set and existente["sync_status"] == "pending":
+                                    # Respetar cambios locales pendientes de subir
+                                    continue
 
                                 fila_limpia: dict[str, Any] = {}
                                 for col in cols_locales:
@@ -524,8 +563,24 @@ class SupabaseSyncEngine:
                                     f"INSERT OR REPLACE INTO {local} ({', '.join(cols_ins)}) VALUES ({ph});",
                                     tuple(fila_limpia[c] for c in cols_ins),
                                 )
+                                if propagar_a_canal_opuesto:
+                                    cambio_real = existente is None or (
+                                        "updated_at" in cols_set
+                                        and str(dict(existente).get("updated_at") or "") != str(fila_limpia.get("updated_at") or "")
+                                    )
+                                    if cambio_real:
+                                        pk_str = "_".join(str(v) for v in vals_pk)
+                                        OutboxQueue.encolar_puente(conn, local, pk_str, fila_limpia, canal_origen="supabase")
+                        else:
+                            errores_pull += 1
+                            ultimo_error_pull = ConnectionError(f"HTTP {status} consultando {remota}")
                     except Exception as pull_ex:
+                        errores_pull += 1
+                        ultimo_error_pull = pull_ex
                         logger.debug("Error en pull de %s: %s", remota, pull_ex)
+
+            if errores_pull >= len(tablas_pull) and ultimo_error_pull is not None:
+                raise ultimo_error_pull
 
         return enviados, recibidos
 

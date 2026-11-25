@@ -60,11 +60,12 @@ class AuthService:
         if user_row:
             payload = json.dumps(dict(user_row), ensure_ascii=False)
             conn.execute(
-                """INSERT INTO sync_outbox(tabla, registro_pk, operacion, payload_json, creado_en, intentos)
-                   VALUES ('usuarios', ?, 'UPSERT', ?, ?, 0)
+                """INSERT INTO sync_outbox(tabla, registro_pk, operacion, payload_json, creado_en, intentos, synced_smb, synced_supabase)
+                   VALUES ('usuarios', ?, 'UPSERT', ?, ?, 0, 0, 0)
                    ON CONFLICT(tabla, registro_pk) DO UPDATE SET
                        operacion='UPSERT', payload_json=excluded.payload_json,
-                       creado_en=excluded.creado_en, intentos=0, ultimo_error=NULL""",
+                       creado_en=excluded.creado_en, intentos=0, ultimo_error=NULL,
+                       synced_smb=0, synced_supabase=0""",
                 (str(user_row["username"]), payload, now_ts),
             )
 

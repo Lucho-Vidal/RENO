@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
 from src.core.config import cargar_configuracion_app, guardar_configuracion_app
 from src.services.shared_sqlite_sync import SharedSQLiteSyncEngine
 from src.services.sync_service import (
+    MODO_ANILLO,
     MODO_LOCAL,
     MODO_SHARED_SQLITE,
     MODO_SUPABASE,
@@ -35,7 +37,7 @@ from src.ui.views.dialogs.base_dialog import BaseDialog
 
 
 class SincronizacionConfigDialog(BaseDialog):
-    """Ventana de configuración de sincronización Local-First, SMB/CIFS y Supabase."""
+    """Ventana de configuración de sincronización Local-First, SMB/CIFS, Supabase y Modo Anillo."""
 
     configuracion_guardada = Signal(dict)
 
@@ -52,8 +54,8 @@ class SincronizacionConfigDialog(BaseDialog):
         self._on_abrir_supabase_avanzado = on_abrir_supabase_avanzado
 
         self.setWindowTitle("Configuración de Sincronización — RENO")
-        self.resize(760, 560)
-        self.setMinimumSize(680, 480)
+        self.resize(780, 620)
+        self.setMinimumSize(680, 500)
 
         self._init_ui()
         self._cargar_config()
@@ -84,12 +86,36 @@ class SincronizacionConfigDialog(BaseDialog):
         self.rb_local = QRadioButton("🏠 Solo Local (Sin sincronización externa)")
         self.rb_shared = QRadioButton("📁 Carpeta Compartida en Red (SMB/CIFS / Ruta UNC / Unidad Mapeada)")
         self.rb_supabase = QRadioButton("☁️ Nube (Supabase PostgreSQL)")
+        self.rb_ring = QRadioButton("🔁 Modo Anillo / Failover Automático (Red Compartida ↔ Supabase)")
 
-        for rb in (self.rb_local, self.rb_shared, self.rb_supabase):
+        for rb in (self.rb_local, self.rb_shared, self.rb_supabase, self.rb_ring):
             rb.setStyleSheet("font-weight: 600;")
             self.bg_modo.addButton(rb)
             lay_modo.addWidget(rb)
             rb.toggled.connect(self._actualizar_visibilidad_paneles)
+
+        # Sub-panel de prioridad del anillo
+        self.widget_ring_opts = QWidget()
+        lay_ring = QVBoxLayout(self.widget_ring_opts)
+        lay_ring.setContentsMargins(20, 4, 0, 4)
+        lay_ring.setSpacing(6)
+        lbl_ring_info = QLabel(
+            "Sincroniza contra ambos canales y hace failover automático si uno cae o está bloqueado. "
+            "Si este puesto solo dispone de uno de los dos canales, dejá el otro vacío y operará igual."
+        )
+        lbl_ring_info.setWordWrap(True)
+        lbl_ring_info.setStyleSheet("color: #0369A1; font-size: 9pt;")
+        lay_ring.addWidget(lbl_ring_info)
+
+        fila_prio = QHBoxLayout()
+        fila_prio.addWidget(QLabel("Canal primario:"))
+        self.combo_ring_primary = QComboBox()
+        self.combo_ring_primary.addItem("📁 Red Compartida primero (LAN → Nube)", MODO_SHARED_SQLITE)
+        self.combo_ring_primary.addItem("☁️ Supabase primero (Nube → LAN)", MODO_SUPABASE)
+        fila_prio.addWidget(self.combo_ring_primary)
+        fila_prio.addStretch(1)
+        lay_ring.addLayout(fila_prio)
+        lay_modo.addWidget(self.widget_ring_opts)
 
         layout.addWidget(grp_modo)
 
@@ -198,7 +224,7 @@ class SincronizacionConfigDialog(BaseDialog):
     def _cargar_config(self) -> None:
         cfg = cargar_configuracion_app()
         modo = str(cfg.get("sync_mode") or "").strip().upper()
-        if modo not in (MODO_LOCAL, MODO_SHARED_SQLITE, MODO_SUPABASE):
+        if modo not in (MODO_LOCAL, MODO_SHARED_SQLITE, MODO_SUPABASE, MODO_ANILLO):
             if self.sync_service is not None:
                 modo = self.sync_service.get_mode()
             else:
@@ -208,8 +234,15 @@ class SincronizacionConfigDialog(BaseDialog):
             self.rb_shared.setChecked(True)
         elif modo == MODO_SUPABASE:
             self.rb_supabase.setChecked(True)
+        elif modo == MODO_ANILLO:
+            self.rb_ring.setChecked(True)
         else:
             self.rb_local.setChecked(True)
+
+        primario = str(cfg.get("sync_ring_primary") or MODO_SHARED_SQLITE).strip().upper()
+        idx_prio = self.combo_ring_primary.findData(primario)
+        if idx_prio >= 0:
+            self.combo_ring_primary.setCurrentIndex(idx_prio)
 
         self.txt_shared_path.setText(str(cfg.get("shared_sqlite_path") or ""))
         self.txt_supa_url.setText(str(cfg.get("supabase_url") or ""))
@@ -223,12 +256,15 @@ class SincronizacionConfigDialog(BaseDialog):
             return MODO_SHARED_SQLITE
         if self.rb_supabase.isChecked():
             return MODO_SUPABASE
+        if self.rb_ring.isChecked():
+            return MODO_ANILLO
         return MODO_LOCAL
 
     def _actualizar_visibilidad_paneles(self) -> None:
         modo = self._modo_seleccionado()
-        self.grp_shared.setVisible(modo == MODO_SHARED_SQLITE)
-        self.grp_supabase.setVisible(modo == MODO_SUPABASE)
+        self.widget_ring_opts.setVisible(modo == MODO_ANILLO)
+        self.grp_shared.setVisible(modo in (MODO_SHARED_SQLITE, MODO_ANILLO))
+        self.grp_supabase.setVisible(modo in (MODO_SUPABASE, MODO_ANILLO))
         self.btn_sync_todo.setEnabled(modo != MODO_LOCAL)
 
     def _examinar_ruta_compartida(self) -> None:
@@ -266,28 +302,38 @@ class SincronizacionConfigDialog(BaseDialog):
         cfg = cargar_configuracion_app()
         modo = self._modo_seleccionado()
         cfg["sync_mode"] = modo
+        cfg["sync_ring_primary"] = str(self.combo_ring_primary.currentData() or MODO_SHARED_SQLITE)
         cfg["shared_sqlite_path"] = self.txt_shared_path.text().strip()
         cfg["supabase_url"] = self.txt_supa_url.text().strip().rstrip("/")
         cfg["supabase_anon_key"] = self.txt_supa_key.text().strip()
         cfg["sync_auto_enabled"] = self.chk_auto_sync.isChecked()
         cfg["sync_interval_sec"] = int(self.spin_intervalo_seg.value())
-        cfg["autosync_habilitado"] = bool(modo == MODO_SUPABASE and cfg["sync_auto_enabled"])
+        cfg["autosync_habilitado"] = bool(modo in (MODO_SUPABASE, MODO_ANILLO) and cfg["sync_auto_enabled"])
         return cfg
 
     def _validar_antes_de_guardar(self) -> bool:
         modo = self._modo_seleccionado()
-        if modo == MODO_SHARED_SQLITE and not self.txt_shared_path.text().strip():
+        tiene_smb = bool(self.txt_shared_path.text().strip())
+        tiene_sb = bool(self.txt_supa_url.text().strip() and self.txt_supa_key.text().strip())
+        if modo == MODO_SHARED_SQLITE and not tiene_smb:
             QMessageBox.warning(
                 self,
                 "Ruta Requerida",
                 "Ingrese la ruta local o UNC de la base SQLite compartida antes de guardar.",
             )
             return False
-        if modo == MODO_SUPABASE and (not self.txt_supa_url.text().strip() or not self.txt_supa_key.text().strip()):
+        if modo == MODO_SUPABASE and not tiene_sb:
             QMessageBox.warning(
                 self,
                 "Credenciales Requeridas",
                 "Ingrese tanto la URL como la Key de Supabase antes de guardar.",
+            )
+            return False
+        if modo == MODO_ANILLO and not (tiene_smb or tiene_sb):
+            QMessageBox.warning(
+                self,
+                "Destino Requerido",
+                "En Modo Anillo debe configurar al menos un destino (Carpeta Compartida SMB o Supabase).",
             )
             return False
         return True

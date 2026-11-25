@@ -352,14 +352,21 @@ class SharedSQLiteSyncEngine:
         logger.info("Base compartida inicializada en %s (journal_mode=DELETE, synchronous=FULL).", ruta_compartida)
         return True
 
-    def push_changes(self, shared_path: str | Path | None = None) -> int:
+    def push_changes(
+        self,
+        shared_path: str | Path | None = None,
+        modo_anillo: bool = False,
+    ) -> int:
         """Envía los cambios pendientes de ``sync_outbox`` hacia la base SQLite compartida."""
         ruta_compartida = self._resolver_ruta(shared_path)
         self.bootstrap_shared_database(ruta_compartida)
 
         enviados = 0
         for _ in range(100):
-            pendientes = self.outbox.obtener_pendientes(limite=200)
+            pendientes = self.outbox.obtener_pendientes(
+                limite=200,
+                canal="smb" if modo_anillo else None,
+            )
             if not pendientes:
                 break
 
@@ -491,7 +498,10 @@ class SharedSQLiteSyncEngine:
             if not ids_procesados:
                 break
 
-            self.outbox.eliminar_procesados(ids_procesados)
+            if modo_anillo:
+                self.outbox.marcar_entregado_canal(ids_procesados, "smb")
+            else:
+                self.outbox.eliminar_procesados(ids_procesados)
             enviados += len(ids_procesados)
 
             if registros_sincronizados:
@@ -510,8 +520,12 @@ class SharedSQLiteSyncEngine:
 
         return enviados
 
-    def pull_changes(self, shared_path: str | Path | None = None) -> int:
-        """Descarga cambios posteriores a ``sync_last_pull_timestamp`` sin re-encolar en ``sync_outbox``."""
+    def pull_changes(
+        self,
+        shared_path: str | Path | None = None,
+        propagar_a_canal_opuesto: bool = False,
+    ) -> int:
+        """Descarga cambios posteriores a ``sync_last_pull_timestamp`` sin re-encolar hacia SMB."""
         ruta_compartida = self._resolver_ruta(shared_path)
         self.bootstrap_shared_database(ruta_compartida)
 
@@ -555,7 +569,7 @@ class SharedSQLiteSyncEngine:
         recibidos = 0
 
         with self.db.write_transaction() as lconn:
-            # Incorporar registros SIN escribir en sync_outbox (evita bucles de eco/rebote)
+            # Incorporar registros SIN re-encolar hacia SMB (evita bucles); en modo anillo puentea solo a Supabase
             for tabla, pk_cols, ts_col, auto_id in TABLAS_SINCRONIZABLES:
                 filas = cambios_por_tabla.get(tabla)
                 if not filas:
@@ -632,6 +646,16 @@ class SharedSQLiteSyncEngine:
                     lconn.execute(sql, vals)
                     recibidos += 1
 
+                    # Efecto Puente (Bridge): si el registro es nuevo o cambió respecto al local,
+                    # re-encolar SOLO para Supabase (synced_smb=1, synced_supabase=0)
+                    if propagar_a_canal_opuesto:
+                        cambio_real = row_loc is None or (
+                            _normalizar_ts_comparable(r.get(ts_col)) != _normalizar_ts_comparable(dict(row_loc).get(ts_col))
+                        )
+                        if cambio_real:
+                            pk_str = "_".join(str(v) for v in pk_vals)
+                            OutboxQueue.encolar_puente(lconn, tabla, pk_str, r, canal_origen="smb")
+
             nuevo_ts = max_ts_visto or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             lconn.execute(
                 "INSERT OR REPLACE INTO configuracion(clave, valor) VALUES (?, ?);",
@@ -640,14 +664,19 @@ class SharedSQLiteSyncEngine:
 
         return recibidos
 
-    def sincronizar_completo(self, shared_path: str | Path | None = None) -> tuple[int, int]:
+    def sincronizar_completo(
+        self,
+        shared_path: str | Path | None = None,
+        modo_anillo: bool = False,
+        propagar_a_canal_opuesto: bool = False,
+    ) -> tuple[int, int]:
         """Ejecuta Push + Pull atómicos en exclusión mutua."""
         if not self._lock.acquire(blocking=False):
             return 0, 0
         try:
             ruta = self._resolver_ruta(shared_path)
-            enviados = self.push_changes(ruta)
-            recibidos = self.pull_changes(ruta)
+            enviados = self.push_changes(ruta, modo_anillo=modo_anillo)
+            recibidos = self.pull_changes(ruta, propagar_a_canal_opuesto=propagar_a_canal_opuesto)
             return enviados, recibidos
         finally:
             self._lock.release()

@@ -672,6 +672,10 @@ def init_database_schema(db: DatabaseManager) -> None:
         cols_outbox = {row[1] for row in conn.execute("PRAGMA table_info(sync_outbox);").fetchall()}
         if "estado" not in cols_outbox:
             conn.execute("ALTER TABLE sync_outbox ADD COLUMN estado TEXT NOT NULL DEFAULT 'PENDIENTE';")
+        if "synced_smb" not in cols_outbox:
+            conn.execute("ALTER TABLE sync_outbox ADD COLUMN synced_smb INTEGER NOT NULL DEFAULT 0;")
+        if "synced_supabase" not in cols_outbox:
+            conn.execute("ALTER TABLE sync_outbox ADD COLUMN synced_supabase INTEGER NOT NULL DEFAULT 0;")
 
         conn.execute(
             "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES (?, ?);",

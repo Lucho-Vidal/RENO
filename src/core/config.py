@@ -276,7 +276,8 @@ def cargar_configuracion_app() -> dict[str, Any]:
         "updater_url": updater_url_env,
         "updater_auto_check": True,
         "sqlite_journal_mode": "WAL",  # 'WAL' o 'DELETE'
-        "sync_mode": "",  # 'LOCAL', 'SHARED_SQLITE', 'SUPABASE' (vacío = inferir por credenciales)
+        "sync_mode": "",  # 'LOCAL', 'SHARED_SQLITE', 'SUPABASE', 'RING' (vacío = inferir por credenciales)
+        "sync_ring_primary": "SHARED_SQLITE",  # 'SHARED_SQLITE' o 'SUPABASE'
         "shared_sqlite_path": "",
         "sync_auto_enabled": True,
         "sync_interval_sec": 45,

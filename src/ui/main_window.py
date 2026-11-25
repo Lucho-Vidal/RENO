@@ -48,7 +48,7 @@ from src.services.backup_service import BackupService
 from src.services.excel_service import ExcelService
 from src.services.pdf_service import PDFService
 from src.services.records_service import RecordsService
-from src.services.sync_service import MODO_LOCAL, MODO_SHARED_SQLITE, MODO_SUPABASE, SyncService
+from src.services.sync_service import MODO_ANILLO, MODO_LOCAL, MODO_SHARED_SQLITE, MODO_SUPABASE, SyncService
 from src.services.sync_worker import SyncBackgroundWorker
 from src.services.word_service import WordService
 from src.ui.views.administracion_view import AdministracionView
@@ -951,6 +951,40 @@ class MainWindow(QMainWindow):
                 self.btn_sync_status.setText(f"📁 Red Desconectada ({pendientes} pend.)")
                 self.btn_sync_status.setStyleSheet(
                     "padding: 2px 10px; font-weight: bold; border-radius: 4px; border: 1px solid #FDBA74; background-color: #FFEDD5; color: #9A3412;"
+                )
+            return
+
+        if modo == MODO_ANILLO:
+            degradado = bool(estado.get("degradado"))
+            msg = str(estado.get("mensaje") or "").strip()
+            has_smb = bool(estado.get("smb_configurado"))
+            has_sb = bool(estado.get("supabase_configurado"))
+            pend_smb = int(estado.get("pendientes_smb", 0))
+            pend_sb = int(estado.get("pendientes_supabase", 0))
+
+            partes_tip = ["Modo Anillo / Failover Automático"]
+            if has_smb:
+                est_smb = "Conectada" if estado.get("smb_ok") else f"Offline ({estado.get('error_smb') or 'sin conexión'})"
+                partes_tip.append(f"• Red Compartida (SMB): {est_smb} — {pend_smb} pend.")
+            if has_sb:
+                est_sb = "Conectado" if estado.get("supabase_ok") else f"Offline ({estado.get('error_supabase') or 'sin conexión'})"
+                partes_tip.append(f"• Supabase (Nube): {est_sb} — {pend_sb} pend.")
+            self.btn_sync_status.setToolTip("\n".join(partes_tip))
+
+            if conectado and not degradado and pendientes == 0:
+                self.btn_sync_status.setText(f"🔁 {msg or 'Anillo Activo'}")
+                self.btn_sync_status.setStyleSheet(
+                    "padding: 2px 10px; font-weight: bold; border-radius: 4px; border: 1px solid #86EFAC; background-color: #DCFCE7; color: #166534;"
+                )
+            elif conectado:
+                self.btn_sync_status.setText(f"⚠️ {msg or f'Anillo Degradado ({pendientes} pend.)'}")
+                self.btn_sync_status.setStyleSheet(
+                    "padding: 2px 10px; font-weight: bold; border-radius: 4px; border: 1px solid #FDE68A; background-color: #FEF3C7; color: #92400E;"
+                )
+            else:
+                self.btn_sync_status.setText(f"🔴 {msg or f'Anillo Offline ({pendientes} pend.)'}")
+                self.btn_sync_status.setStyleSheet(
+                    "padding: 2px 10px; font-weight: bold; border-radius: 4px; border: 1px solid #FCA5A5; background-color: #FEE2E2; color: #991B1B;"
                 )
             return
 
