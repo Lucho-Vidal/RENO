@@ -35,6 +35,7 @@ from src.services.records_service import RecordsService
 from src.ui.models.multi_filter_proxy import MultiFilterProxyModel
 from src.ui.views.dialogs.conocimiento_via_dialogs import (
     AdminSectoresViaDialog,
+    AutocompletarMasivoViaDialog,
     AutocompletarTurnoViaDialog,
     EditarConocimientoDialog,
 )
@@ -237,7 +238,7 @@ class ConocimientoViaView(QWidget):
     def _can(self, perm: str) -> bool:
         if self.tiene_permiso_fn:
             return bool(self.tiene_permiso_fn(perm))
-        return True
+        return False
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -302,6 +303,18 @@ class ConocimientoViaView(QWidget):
         self.btn_autocompletar.setEnabled(self._can("conocimiento_via.editar"))
         self.btn_autocompletar.clicked.connect(self._autocompletar_por_turno)
         top_lay.addWidget(self.btn_autocompletar)
+
+        puede_masivo = self._can("conocimiento_via.autocompletar_masivo")
+        self.btn_autocompletar_masivo = QPushButton("⚡⚡ Calcular Todo el Personal")
+        self.btn_autocompletar_masivo.setObjectName("btnSecondary")
+        self.btn_autocompletar_masivo.setEnabled(puede_masivo)
+        self.btn_autocompletar_masivo.setToolTip(
+            "Calcula y registra el conocimiento de vía para todo el personal de conducción según su turno asignado."
+            if puede_masivo
+            else "Requiere el permiso 'conocimiento_via.autocompletar_masivo'."
+        )
+        self.btn_autocompletar_masivo.clicked.connect(self._autocompletar_masivo)
+        top_lay.addWidget(self.btn_autocompletar_masivo)
 
         self.btn_sectores = QPushButton("⚙️ Sectores")
         self.btn_sectores.setObjectName("btnSecondary")
@@ -440,6 +453,8 @@ class ConocimientoViaView(QWidget):
             self._abrir_edicion(fila, sector)
 
     def _editar_seleccion(self) -> None:
+        if not self._can("conocimiento_via.editar"):
+            return
         fila, sector = self._obtener_celda_seleccionada()
         if not fila:
             QMessageBox.information(self, "Selección", "Seleccione una fila/celda de personal de conducción en la tabla.")
@@ -466,6 +481,8 @@ class ConocimientoViaView(QWidget):
             self.consultar()
 
     def _autocompletar_por_turno(self) -> None:
+        if not self._can("conocimiento_via.editar"):
+            return
         fila, _ = self._obtener_celda_seleccionada()
         if not fila:
             QMessageBox.information(
@@ -483,7 +500,24 @@ class ConocimientoViaView(QWidget):
         if dlg.exec():
             self.consultar()
 
+    def _autocompletar_masivo(self) -> None:
+        if not self._can("conocimiento_via.autocompletar_masivo"):
+            return
+        dot = self.combo_dot.currentText()
+        esp = self.combo_esp.currentText()
+        dlg = AutocompletarMasivoViaDialog(
+            records_service=self.records_service,
+            usuario_actual=self.usuario_actual,
+            dotacion_actual=None if dot == "Todas" else dot,
+            especialidad_actual=None if esp == "Todas" else esp,
+            parent=self,
+        )
+        if dlg.exec():
+            self.consultar()
+
     def _administrar_sectores(self) -> None:
+        if not self._can("conocimiento_via.administrar"):
+            return
         dlg = AdminSectoresViaDialog(
             records_service=self.records_service,
             usuario_actual=self.usuario_actual,

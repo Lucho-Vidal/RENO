@@ -76,6 +76,7 @@ def test_permisos_conocimiento_via_en_grupos_ui():
     }
     assert "conocimiento_via.ver" in todos_en_pestanas
     assert "conocimiento_via.editar" in todos_en_pestanas
+    assert "conocimiento_via.autocompletar_masivo" in todos_en_pestanas
     assert "conocimiento_via.administrar" in todos_en_pestanas
 
 

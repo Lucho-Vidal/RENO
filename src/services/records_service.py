@@ -5833,11 +5833,16 @@ class RecordsService:
         legajo: int,
         codigo_turno: Optional[str] = None,
         regimen: Optional[str] = None,
+        itinerario: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Analiza el turno asignado a un agente en `turnos_itinerario` / `turnos_vueltas`
         y propone los sectores de vía y sentidos (ASC alejándose de PC, DESC hacia PC) recorridos.
         """
         from src.domain.conocimiento_via import resolver_sectores_recorrido
+
+        itin_filtro = str(itinerario or "").strip()
+        if itin_filtro in ("Todos", "TODOS", "Vigente (más reciente)"):
+            itin_filtro = ""
 
         with self.db.read_connection() as conn:
             emp_row = conn.execute(
@@ -5863,27 +5868,33 @@ class RecordsService:
             if regimen and regimen not in ("Todos", "TODOS"):
                 sql_t += " AND UPPER(TRIM(regimen)) = UPPER(TRIM(?))"
                 params_t.append(regimen)
+            if itin_filtro:
+                sql_t += " AND TRIM(itinerario_vigente) = TRIM(?)"
+                params_t.append(itin_filtro)
             sql_t += " ORDER BY itinerario_vigente DESC, id DESC"
             turnos_rows = [dict(r) for r in conn.execute(sql_t, params_t).fetchall()]
 
             if not turnos_rows and "." in turno_objetivo:
                 # Fallback: buscar por turno_base antes del punto (ej. 401.1 -> 401)
                 base_sin_sub = turno_objetivo.split(".")[0].strip()
-                turnos_rows = [
-                    dict(r)
-                    for r in conn.execute(
-                        """SELECT id, codigo_turno, regimen, turno_base, itinerario_vigente
-                           FROM turnos_itinerario
-                           WHERE activo = 1 AND UPPER(TRIM(turno_base)) = UPPER(TRIM(?))
-                           ORDER BY itinerario_vigente DESC, id DESC""",
-                        (base_sin_sub,),
-                    ).fetchall()
-                ]
+                params_fb: List[Any] = [base_sin_sub]
+                sql_fb = """SELECT id, codigo_turno, regimen, turno_base, itinerario_vigente
+                            FROM turnos_itinerario
+                            WHERE activo = 1 AND UPPER(TRIM(turno_base)) = UPPER(TRIM(?))"""
+                if regimen and regimen not in ("Todos", "TODOS"):
+                    sql_fb += " AND UPPER(TRIM(regimen)) = UPPER(TRIM(?))"
+                    params_fb.append(regimen)
+                if itin_filtro:
+                    sql_fb += " AND TRIM(itinerario_vigente) = TRIM(?)"
+                    params_fb.append(itin_filtro)
+                sql_fb += " ORDER BY itinerario_vigente DESC, id DESC"
+                turnos_rows = [dict(r) for r in conn.execute(sql_fb, params_fb).fetchall()]
 
             if not turnos_rows:
                 return {
                     "empleado": emp,
                     "turno_buscado": turno_objetivo,
+                    "itinerario_usado": itin_filtro,
                     "turnos_encontrados": [],
                     "vueltas": [],
                     "propuestas": [],
@@ -5966,6 +5977,7 @@ class RecordsService:
         return {
             "empleado": emp,
             "turno_buscado": turno_objetivo,
+            "itinerario_usado": str(itin_max or "").strip(),
             "turnos_encontrados": seleccionados,
             "vueltas": vueltas,
             "propuestas": propuestas,
@@ -5977,15 +5989,46 @@ class RecordsService:
         items: Sequence[Dict[str, Any]],
         fecha_conocimiento: Any,
         turno_referencia: str = "",
+        itinerario: str = "",
+        plantilla_observacion: Optional[str] = None,
+        solo_si_mas_reciente: bool = False,
         user_id: Optional[int] = None,
         windows_user: Optional[str] = None,
     ) -> int:
         """Persiste los sectores/sentidos confirmados desde el autocompletado por turno."""
+        from src.domain.conocimiento_via import formatear_observacion_turno, normalizar_fecha_iso
+
+        fecha_iso = normalizar_fecha_iso(fecha_conocimiento)
+        if not fecha_iso:
+            raise ValueError("Debe ingresar una fecha de conocimiento válida (DD/MM/YYYY).")
+
+        fechas_existentes: Dict[Tuple[int, str], str] = {}
+        if solo_si_mas_reciente:
+            with self.db.read_connection() as conn:
+                for row in conn.execute(
+                    "SELECT sector_id, sentido, fecha_conocimiento FROM via_conocimientos WHERE legajo = ?",
+                    (int(legajo),),
+                ).fetchall():
+                    fechas_existentes[(int(row["sector_id"]), str(row["sentido"]).upper())] = str(
+                        row["fecha_conocimiento"] or ""
+                    )
+
         total = 0
         for item in items:
             sid = int(item["sector_id"])
             sentido = str(item["sentido"]).upper()
-            obs = str(item.get("observaciones") or item.get("detalle") or f"Autocompletado por turno {turno_referencia}").strip()
+            if solo_si_mas_reciente:
+                f_prev = fechas_existentes.get((sid, sentido), "")
+                if f_prev and f_prev >= fecha_iso:
+                    continue
+            obs_item = str(item.get("observaciones") or "").strip()
+            if not obs_item:
+                obs_item = formatear_observacion_turno(
+                    itinerario=itinerario,
+                    turno=turno_referencia,
+                    trenes=str(item.get("detalle") or "").strip(),
+                    plantilla=plantilla_observacion,
+                )
             total += self.guardar_conocimiento_via(
                 legajo=int(legajo),
                 sector_id=sid,
@@ -5993,11 +6036,427 @@ class RecordsService:
                 fecha_conocimiento=fecha_conocimiento,
                 origen_registro="turno",
                 turno_referencia=turno_referencia,
-                observaciones=obs,
+                observaciones=obs_item,
                 user_id=user_id,
                 windows_user=windows_user,
             )
         return total
+
+    def previsualizar_conocimientos_masivo(
+        self,
+        dotacion: Optional[str] = None,
+        especialidad: Optional[str] = None,
+        itinerario: Optional[str] = None,
+        regimen: Optional[str] = None,
+        fecha_conocimiento: Any = None,
+        plantilla_observacion: Optional[str] = None,
+        solo_si_mas_reciente: bool = True,
+    ) -> Dict[str, Any]:
+        """Previsualiza el cálculo masivo de conocimiento de vía para todo el personal de conducción.
+
+        Realiza cargas agrupadas (sin consultas N+1) para resolver turnos, vueltas, paradas
+        intermedias y conocimientos existentes, clasificando cada agente como listo, sin cambios
+        por fecha más reciente u omitido con motivo explícito.
+        """
+        from src.domain.conocimiento_via import (
+            formatear_observacion_turno,
+            normalizar_fecha_iso,
+            resolver_sectores_recorrido,
+        )
+
+        fecha_iso = normalizar_fecha_iso(fecha_conocimiento or date.today())
+        if not fecha_iso:
+            raise ValueError("Debe ingresar una fecha de conocimiento válida (DD/MM/YYYY).")
+
+        itin_filtro = str(itinerario or "").strip()
+        if itin_filtro in ("Todos", "TODOS", "Vigente (más reciente)"):
+            itin_filtro = ""
+        reg_filtro = str(regimen or "").strip()
+        if reg_filtro in ("Todos", "TODOS"):
+            reg_filtro = ""
+
+        empleados = self.listar_personal_conduccion(dotacion=dotacion, especialidad=especialidad)
+        sectores_activos = self.listar_sectores_via(incluir_inactivos=False)
+        catalogo = self._obtener_indice_estaciones()
+        orden_sec = {int(s["id"]): idx for idx, s in enumerate(sectores_activos)}
+
+        with self.db.read_connection() as conn:
+            sql_t = """
+                SELECT id, codigo_turno, regimen, turno_base, itinerario_vigente
+                FROM turnos_itinerario
+                WHERE activo = 1
+            """
+            params_t: List[Any] = []
+            if reg_filtro:
+                sql_t += " AND UPPER(TRIM(regimen)) = UPPER(TRIM(?))"
+                params_t.append(reg_filtro)
+            if itin_filtro:
+                sql_t += " AND TRIM(itinerario_vigente) = TRIM(?)"
+                params_t.append(itin_filtro)
+            sql_t += " ORDER BY itinerario_vigente DESC, id DESC"
+            turnos_all = [dict(r) for r in conn.execute(sql_t, params_t).fetchall()]
+
+            por_codigo: Dict[str, List[Dict[str, Any]]] = {}
+            por_base: Dict[str, List[Dict[str, Any]]] = {}
+            for t in turnos_all:
+                cod_k = str(t.get("codigo_turno") or "").strip().upper()
+                base_k = str(t.get("turno_base") or "").strip().upper()
+                if cod_k:
+                    por_codigo.setdefault(cod_k, []).append(t)
+                if base_k:
+                    por_base.setdefault(base_k, []).append(t)
+
+            vueltas_por_turno: Dict[int, List[Dict[str, Any]]] = {}
+            trenes_unicos: set[str] = set()
+            if turnos_all:
+                for v in conn.execute(
+                    """SELECT v.id, v.turno_id, t.codigo_turno, t.regimen, v.nro_vuelta,
+                              v.nro_tren, v.origen, v.hora_salida, v.destino, v.hora_llegada
+                       FROM turnos_vueltas v
+                       JOIN turnos_itinerario t ON t.id = v.turno_id
+                       WHERE t.activo = 1
+                       ORDER BY t.codigo_turno ASC, v.nro_vuelta ASC"""
+                ).fetchall():
+                    vd = dict(v)
+                    vueltas_por_turno.setdefault(int(vd["turno_id"]), []).append(vd)
+                    nt = str(vd.get("nro_tren") or "").strip()
+                    if nt:
+                        trenes_unicos.add(nt)
+
+            paradas_por_tren: Dict[str, List[str]] = {}
+            if trenes_unicos:
+                for p in conn.execute(
+                    """SELECT nro_tren, estacion
+                       FROM tren_paradas
+                       ORDER BY nro_tren ASC, orden_parada ASC"""
+                ).fetchall():
+                    nt = str(p["nro_tren"]).strip()
+                    if nt in trenes_unicos:
+                        paradas_por_tren.setdefault(nt, []).append(str(p["estacion"]).strip())
+
+            conoc_existentes: Dict[Tuple[int, int, str], str] = {}
+            for c in conn.execute(
+                "SELECT legajo, sector_id, sentido, fecha_conocimiento FROM via_conocimientos"
+            ).fetchall():
+                conoc_existentes[(int(c["legajo"]), int(c["sector_id"]), str(c["sentido"]).upper())] = str(
+                    c["fecha_conocimiento"] or ""
+                )
+
+        # Cache de propuestas resueltas por conjunto de turno_ids para evitar recalcular turnos compartidos
+        cache_propuestas_turnos: Dict[Tuple[int, ...], List[Dict[str, Any]]] = {}
+
+        def _resolver_propuestas_para_turnos(ids_t: Tuple[int, ...]) -> List[Dict[str, Any]]:
+            if ids_t in cache_propuestas_turnos:
+                return cache_propuestas_turnos[ids_t]
+            propuestas_map: Dict[Tuple[int, str], Dict[str, Any]] = {}
+            for tid in ids_t:
+                for v in vueltas_por_turno.get(tid, []):
+                    ori = str(v.get("origen") or "").strip()
+                    des = str(v.get("destino") or "").strip()
+                    if not ori or not des:
+                        continue
+                    nro_tren = str(v.get("nro_tren") or "").strip()
+                    paradas = paradas_por_tren.get(nro_tren)
+                    pasos = resolver_sectores_recorrido(
+                        ori, des, sectores_activos, paradas_intermedias=paradas, catalogo=catalogo
+                    )
+                    detalle_tramo = f"Tren {nro_tren or '-'} ({ori} → {des})"
+                    for paso in pasos:
+                        sid = paso.get("sector_id")
+                        if sid is None:
+                            continue
+                        clave = (int(sid), paso["sentido"])
+                        if clave not in propuestas_map:
+                            propuestas_map[clave] = {
+                                "sector_id": int(sid),
+                                "codigo": paso["codigo"],
+                                "sentido": paso["sentido"],
+                                "origenes_detalle": [detalle_tramo],
+                            }
+                        elif detalle_tramo not in propuestas_map[clave]["origenes_detalle"]:
+                            propuestas_map[clave]["origenes_detalle"].append(detalle_tramo)
+
+            props = sorted(
+                propuestas_map.values(),
+                key=lambda p: (orden_sec.get(p["sector_id"], 9999), 0 if p["sentido"] == "ASC" else 1),
+            )
+            resultado = [
+                {
+                    "sector_id": p["sector_id"],
+                    "codigo": p["codigo"],
+                    "sentido": p["sentido"],
+                    "detalle": "; ".join(p["origenes_detalle"][:4]),
+                }
+                for p in props
+            ]
+            cache_propuestas_turnos[ids_t] = resultado
+            return resultado
+
+        registros: List[Dict[str, Any]] = []
+        agentes_listos = 0
+        agentes_sin_cambios = 0
+        agentes_omitidos = 0
+        total_aplicables = 0
+        total_omitidos_fecha = 0
+
+        for emp in empleados:
+            leg = int(emp["legajo"])
+            turno_emp = str(emp.get("turnos") or "").strip()
+            base_reg = {
+                "empleado": dict(emp),
+                "legajo": leg,
+                "apellidos_nombres": str(emp.get("apellidos_nombres") or ""),
+                "especialidad": str(emp.get("especialidad") or ""),
+                "dotacion": str(emp.get("dotacion") or ""),
+                "turno": turno_emp,
+                "itinerario": itin_filtro,
+                "regimen": reg_filtro or "Todos",
+                "propuestas_aplicables": [],
+                "propuestas_omitidas_fecha": [],
+                "total_detectados": 0,
+                "observacion_ejemplo": "",
+            }
+
+            if not turno_emp:
+                agentes_omitidos += 1
+                base_reg["estado"] = "SIN_TURNO"
+                base_reg["motivo"] = "Sin turno asignado en padrón"
+                registros.append(base_reg)
+                continue
+
+            tk = turno_emp.upper()
+            candidatos = por_codigo.get(tk) or por_base.get(tk) or []
+            if not candidatos and "." in tk:
+                base_sin_sub = tk.split(".")[0].strip()
+                candidatos = por_base.get(base_sin_sub) or []
+
+            if not candidatos:
+                agentes_omitidos += 1
+                base_reg["estado"] = "TURNO_NO_ENCONTRADO"
+                base_reg["motivo"] = (
+                    f"Turno '{turno_emp}' no encontrado"
+                    + (f" en itinerario {itin_filtro}" if itin_filtro else " en turnos_itinerario")
+                )
+                registros.append(base_reg)
+                continue
+
+            exactos = [t for t in candidatos if str(t.get("codigo_turno") or "").strip().upper() == tk]
+            seleccionados = exactos or candidatos
+            itin_max = str(seleccionados[0].get("itinerario_vigente") or "").strip()
+            seleccionados = [t for t in seleccionados if str(t.get("itinerario_vigente") or "").strip() == itin_max]
+            regimenes_enc = sorted({str(t.get("regimen") or "").strip() for t in seleccionados if t.get("regimen")})
+            reg_txt = "/".join(regimenes_enc) if regimenes_enc else (reg_filtro or "Todos")
+
+            ids_t = tuple(sorted(int(t["id"]) for t in seleccionados))
+            propuestas_raw = _resolver_propuestas_para_turnos(ids_t)
+            base_reg["itinerario"] = itin_max
+            base_reg["regimen"] = reg_txt
+            base_reg["total_detectados"] = len(propuestas_raw)
+
+            if not propuestas_raw:
+                agentes_omitidos += 1
+                base_reg["estado"] = "SIN_SECTORES"
+                base_reg["motivo"] = f"Turno '{turno_emp}' (itin. {itin_max or '-'}) sin sectores de vía activos mapeables"
+                registros.append(base_reg)
+                continue
+
+            aplicables: List[Dict[str, Any]] = []
+            omitidas_fecha: List[Dict[str, Any]] = []
+            for p in propuestas_raw:
+                f_prev = conoc_existentes.get((leg, int(p["sector_id"]), p["sentido"]), "")
+                obs = formatear_observacion_turno(
+                    itinerario=itin_max,
+                    turno=turno_emp,
+                    regimen=reg_txt,
+                    trenes=p.get("detalle", ""),
+                    plantilla=plantilla_observacion,
+                )
+                item_p = {
+                    **p,
+                    "fecha_actual_iso": f_prev,
+                    "observaciones": obs,
+                }
+                if solo_si_mas_reciente and f_prev and f_prev >= fecha_iso:
+                    omitidas_fecha.append(item_p)
+                else:
+                    aplicables.append(item_p)
+
+            base_reg["propuestas_aplicables"] = aplicables
+            base_reg["propuestas_omitidas_fecha"] = omitidas_fecha
+            base_reg["observacion_ejemplo"] = (
+                aplicables[0]["observaciones"]
+                if aplicables
+                else (omitidas_fecha[0]["observaciones"] if omitidas_fecha else "")
+            )
+
+            total_aplicables += len(aplicables)
+            total_omitidos_fecha += len(omitidas_fecha)
+
+            if aplicables:
+                agentes_listos += 1
+                base_reg["estado"] = "LISTO"
+                extra = f" ({len(omitidas_fecha)} ya más recientes)" if omitidas_fecha else ""
+                base_reg["motivo"] = f"{len(aplicables)} sector(es)/sentido(s) a registrar{extra}"
+            else:
+                agentes_sin_cambios += 1
+                base_reg["estado"] = "SIN_CAMBIOS_FECHA"
+                base_reg["motivo"] = f"Todos los sectores ({len(omitidas_fecha)}) ya poseen fecha igual o más reciente"
+
+            registros.append(base_reg)
+
+        return {
+            "itinerario_filtro": itin_filtro,
+            "regimen_filtro": reg_filtro,
+            "fecha_iso": fecha_iso,
+            "solo_si_mas_reciente": bool(solo_si_mas_reciente),
+            "total_personal": len(empleados),
+            "agentes_listos": agentes_listos,
+            "agentes_sin_cambios": agentes_sin_cambios,
+            "agentes_omitidos": agentes_omitidos,
+            "total_conocimientos_a_aplicar": total_aplicables,
+            "total_omitidos_fecha_reciente": total_omitidos_fecha,
+            "registros": registros,
+        }
+
+    def aplicar_conocimientos_masivo(
+        self,
+        registros_seleccionados: Sequence[Dict[str, Any]],
+        fecha_conocimiento: Any,
+        plantilla_observacion: Optional[str] = None,
+        solo_si_mas_reciente: bool = True,
+        user_id: Optional[int] = None,
+        windows_user: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """Persiste en una única transacción los conocimientos de vía calculados masivamente."""
+        from src.domain.conocimiento_via import formatear_observacion_turno, normalizar_fecha_iso
+
+        fecha_iso = normalizar_fecha_iso(fecha_conocimiento)
+        if not fecha_iso:
+            raise ValueError("Debe ingresar una fecha de conocimiento válida (DD/MM/YYYY).")
+
+        ahora = self.db.now()
+        win_u = windows_user or obtener_usuario_windows()
+
+        agentes_actualizados = 0
+        conocimientos_guardados = 0
+        omitidos_fecha_reciente = 0
+        legajos_afectados: List[int] = []
+        itinerarios_usados: set[str] = set()
+
+        with self.db.write_transaction() as conn:
+            for reg in registros_seleccionados:
+                leg = int(reg["legajo"])
+                turno_ref = str(reg.get("turno") or "").strip()
+                itin = str(reg.get("itinerario") or "").strip()
+                reg_txt = str(reg.get("regimen") or "").strip()
+                propuestas = reg.get("propuestas_aplicables") or []
+                if not propuestas:
+                    continue
+
+                guardados_agente = 0
+                for prop in propuestas:
+                    sid = int(prop["sector_id"])
+                    sentido = str(prop["sentido"]).strip().upper()
+                    if sentido not in ("ASC", "DESC"):
+                        continue
+
+                    before_row = conn.execute(
+                        "SELECT * FROM via_conocimientos WHERE legajo = ? AND sector_id = ? AND sentido = ?",
+                        (leg, sid, sentido),
+                    ).fetchone()
+                    if solo_si_mas_reciente and before_row:
+                        f_prev = str(before_row["fecha_conocimiento"] or "")
+                        if f_prev and f_prev >= fecha_iso:
+                            omitidos_fecha_reciente += 1
+                            continue
+
+                    if plantilla_observacion is not None:
+                        obs = formatear_observacion_turno(
+                            itinerario=itin,
+                            turno=turno_ref,
+                            regimen=reg_txt,
+                            trenes=str(prop.get("detalle") or "").strip(),
+                            plantilla=plantilla_observacion,
+                        )
+                    else:
+                        obs = str(prop.get("observaciones") or "").strip() or formatear_observacion_turno(
+                            itinerario=itin,
+                            turno=turno_ref,
+                            regimen=reg_txt,
+                            trenes=str(prop.get("detalle") or "").strip(),
+                        )
+
+                    conn.execute(
+                        """INSERT INTO via_conocimientos
+                           (legajo, sector_id, sentido, fecha_conocimiento, origen_registro, turno_referencia,
+                            observaciones, usuario_id, usuario_windows, sync_status, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, 'turno_masivo', ?, ?, ?, ?, 'pending', ?, ?)
+                           ON CONFLICT(legajo, sector_id, sentido) DO UPDATE SET
+                               fecha_conocimiento = excluded.fecha_conocimiento,
+                               origen_registro = excluded.origen_registro,
+                               turno_referencia = excluded.turno_referencia,
+                               observaciones = excluded.observaciones,
+                               usuario_id = excluded.usuario_id,
+                               usuario_windows = excluded.usuario_windows,
+                               sync_status = 'pending',
+                               updated_at = excluded.updated_at""",
+                        (
+                            leg,
+                            sid,
+                            sentido,
+                            fecha_iso,
+                            turno_ref,
+                            obs,
+                            user_id,
+                            win_u,
+                            ahora,
+                            ahora,
+                        ),
+                    )
+                    after = dict(
+                        conn.execute(
+                            "SELECT * FROM via_conocimientos WHERE legajo = ? AND sector_id = ? AND sentido = ?",
+                            (leg, sid, sentido),
+                        ).fetchone()
+                    )
+                    pk_comp = f"{leg}|{sid}|{sentido}"
+                    self._enqueue_sync(conn, "via_conocimientos", pk_comp, "UPSERT", after)
+                    guardados_agente += 1
+                    conocimientos_guardados += 1
+
+                if guardados_agente > 0:
+                    agentes_actualizados += 1
+                    legajos_afectados.append(leg)
+                    if itin:
+                        itinerarios_usados.add(itin)
+
+            if conocimientos_guardados > 0:
+                self._audit(
+                    conn,
+                    user_id,
+                    win_u,
+                    "autocompletar_masivo",
+                    "via_conocimiento",
+                    0,
+                    None,
+                    {
+                        "fecha_conocimiento": fecha_iso,
+                        "agentes_actualizados": agentes_actualizados,
+                        "conocimientos_guardados": conocimientos_guardados,
+                        "omitidos_fecha_reciente": omitidos_fecha_reciente,
+                        "itinerarios": sorted(itinerarios_usados),
+                        "solo_si_mas_reciente": bool(solo_si_mas_reciente),
+                        "plantilla_observacion": str(plantilla_observacion or "").strip(),
+                        "legajos": legajos_afectados,
+                    },
+                )
+
+        return {
+            "agentes_actualizados": agentes_actualizados,
+            "conocimientos_guardados": conocimientos_guardados,
+            "omitidos_fecha_reciente": omitidos_fecha_reciente,
+        }
+
 
     # =========================================================================
     # REMOCIONES E HISTORIAL DE TURNOS DEL PERSONAL

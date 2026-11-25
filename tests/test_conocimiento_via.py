@@ -167,3 +167,194 @@ def test_flujo_completo_bd_sectores_matriz_autocompletar_y_excel(tmp_path: Path)
     # 6. Exportación a Excel
     xlsx_out = excel.export_conocimiento_via(str(tmp_path / "conocimiento.xlsx"), matriz["sectores"], matriz["filas"])
     assert Path(xlsx_out).exists() and Path(xlsx_out).stat().st_size > 1000
+
+
+def test_formatear_observacion_turno_default_y_personalizada():
+    from src.domain.conocimiento_via import PLANTILLA_OBS_TURNO_DEFAULT, formatear_observacion_turno
+
+    obs_def = formatear_observacion_turno(itinerario="45", turno="401.1")
+    assert obs_def == "Se da como conocida ya que en el itinerario 45 el personal tenía el turno 401.1."
+
+    obs_custom = formatear_observacion_turno(
+        itinerario="46",
+        turno="402.2",
+        regimen="H",
+        trenes="Tren 3555 (PC → GW)",
+        plantilla="Itin {itinerario} | Turno {turno} ({regimen}) - {trenes}",
+    )
+    assert obs_custom == "Itin 46 | Turno 402.2 (H) - Tren 3555 (PC → GW)"
+    assert "{itinerario}" in PLANTILLA_OBS_TURNO_DEFAULT and "{turno}" in PLANTILLA_OBS_TURNO_DEFAULT
+
+
+def test_calculo_masivo_observaciones_proteccion_fechas_sync_y_auditoria(tmp_path: Path):
+    db = DatabaseManager(tmp_path / "via_masivo.sqlite")
+    init_database_schema(db)
+    records = RecordsService(db)
+    sectores = records.listar_sectores_via()
+    sec_pc_ty = [s for s in sectores if s["codigo"] == "PC-TY"][0]
+
+    with db.write_transaction() as conn:
+        conn.execute(
+            """INSERT INTO empleados
+               (legajo, apellidos_nombres, especialidad, dotacion, turnos, franco, franco_horario, jornada_horas, activo, actualizado_en)
+               VALUES
+               (2001, 'Conductor Uno', 'Conductor Electrico', 'TY', '401.1', 'Domingo', '', 6, 1, '2026-11-01 00:00:00'),
+               (2002, 'Ayudante Dos', 'Ayudante Conductor', 'TY', '401.1', 'Lunes', '', 6, 1, '2026-11-01 00:00:00'),
+               (2003, 'Sin Turno Tres', 'Conductor Diesel', 'TY', '', 'Martes', '', 6, 1, '2026-11-01 00:00:00'),
+               (2004, 'Turno Inexistente', 'Conductor Diesel', 'TY', '999.9', 'Miércoles', '', 6, 1, '2026-11-01 00:00:00'),
+               (2005, 'Guardatren Excluido', 'Guardatren Electrico', 'TY', '401.1', 'Jueves', '', 7, 1, '2026-11-01 00:00:00')"""
+        )
+        cur = conn.execute(
+            """INSERT INTO turnos_itinerario
+               (codigo_turno, regimen, turno_base, subindice, tipo_turno, deposito_base, itinerario_vigente, activo)
+               VALUES ('401.1', 'H', '401', 1, 'H', 'TY', '45', 1)"""
+        )
+        tid = cur.lastrowid
+        conn.execute(
+            """INSERT INTO turnos_vueltas (turno_id, nro_vuelta, nro_tren, origen, hora_salida, destino, hora_llegada)
+               VALUES (?, 1, '3555', 'PC', '06:00', 'GW', '06:50'),
+                      (?, 2, '3556', 'GW', '07:05', 'PC', '07:55')""",
+            (tid, tid),
+        )
+
+    # Registrar un conocimiento más reciente en PC-TY ASC para el 2001 (debe quedar protegido)
+    records.guardar_conocimiento_via(
+        2001, sec_pc_ty["id"], ["ASC"], "25/11/2026", origen_registro="manual", observaciones="Examen manual"
+    )
+
+    prev = records.previsualizar_conocimientos_masivo(
+        itinerario="45",
+        fecha_conocimiento="20/11/2026",
+        solo_si_mas_reciente=True,
+    )
+    assert prev["total_personal"] == 4  # Guardatren 2005 excluido
+    assert prev["agentes_listos"] == 2  # 2001 y 2002
+    assert prev["agentes_omitidos"] == 2  # 2003 (SIN_TURNO) y 2004 (TURNO_NO_ENCONTRADO)
+    assert prev["total_conocimientos_a_aplicar"] == 11  # 5 para 2001 (1 protegido) + 6 para 2002
+    assert prev["total_omitidos_fecha_reciente"] == 1
+
+    por_leg = {r["legajo"]: r for r in prev["registros"]}
+    assert por_leg[2003]["estado"] == "SIN_TURNO"
+    assert por_leg[2004]["estado"] == "TURNO_NO_ENCONTRADO"
+    assert por_leg[2001]["estado"] == "LISTO"
+    assert (
+        por_leg[2001]["observacion_ejemplo"]
+        == "Se da como conocida ya que en el itinerario 45 el personal tenía el turno 401.1."
+    )
+
+    listos = [r for r in prev["registros"] if r["estado"] == "LISTO"]
+    res_ap = records.aplicar_conocimientos_masivo(
+        registros_seleccionados=listos,
+        fecha_conocimiento="20/11/2026",
+        solo_si_mas_reciente=True,
+        user_id=None,
+        windows_user="tester",
+    )
+    assert res_ap["agentes_actualizados"] == 2
+    assert res_ap["conocimientos_guardados"] == 11
+    assert res_ap["omitidos_fecha_reciente"] == 0
+
+    with db.read_connection() as conn:
+        # PC-TY ASC del 2001 mantuvo su fecha más reciente y observación manual
+        row_prot = conn.execute(
+            "SELECT fecha_conocimiento, origen_registro, observaciones FROM via_conocimientos "
+            "WHERE legajo = 2001 AND sector_id = ? AND sentido = 'ASC'",
+            (sec_pc_ty["id"],),
+        ).fetchone()
+        assert row_prot["fecha_conocimiento"] == "2026-11-25"
+        assert row_prot["origen_registro"] == "manual"
+        assert row_prot["observaciones"] == "Examen manual"
+
+        # PC-TY DESC del 2001 se registró por cálculo masivo con la observación descriptiva
+        row_mas = conn.execute(
+            "SELECT fecha_conocimiento, origen_registro, turno_referencia, observaciones FROM via_conocimientos "
+            "WHERE legajo = 2001 AND sector_id = ? AND sentido = 'DESC'",
+            (sec_pc_ty["id"],),
+        ).fetchone()
+        assert row_mas["fecha_conocimiento"] == "2026-11-20"
+        assert row_mas["origen_registro"] == "turno_masivo"
+        assert row_mas["turno_referencia"] == "401.1"
+        assert (
+            row_mas["observaciones"]
+            == "Se da como conocida ya que en el itinerario 45 el personal tenía el turno 401.1."
+        )
+
+        # Verificación de sync_outbox y auditoría
+        outbox_cnt = conn.execute(
+            "SELECT COUNT(*) FROM sync_outbox WHERE tabla = 'via_conocimientos' AND operacion = 'UPSERT'"
+        ).fetchone()[0]
+        assert outbox_cnt >= 11
+
+        aud = conn.execute(
+            "SELECT accion, entidad FROM auditoria WHERE accion = 'autocompletar_masivo'"
+        ).fetchone()
+        assert aud is not None and aud["entidad"] == "via_conocimiento"
+
+    # Si se desactiva la protección de fecha más reciente, debe sobrescribir PC-TY ASC del 2001
+    prev_forzado = records.previsualizar_conocimientos_masivo(
+        itinerario="45",
+        fecha_conocimiento="20/11/2026",
+        solo_si_mas_reciente=False,
+    )
+    assert prev_forzado["total_conocimientos_a_aplicar"] == 12
+
+
+def test_rbac_y_dialogo_conocimiento_via_masivo_ui(tmp_path: Path):
+    from PySide6.QtWidgets import QApplication
+
+    from src.domain.enums import PERMISOS_BASE, PERMISOS_METADATA
+    from src.services.auth_service import AuthService
+    from src.ui.views.conocimiento_via_view import ConocimientoViaView
+    from src.ui.views.dialogs.conocimiento_via_dialogs import AutocompletarMasivoViaDialog
+
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+
+    assert "conocimiento_via.autocompletar_masivo" in PERMISOS_BASE
+    assert "conocimiento_via.autocompletar_masivo" in PERMISOS_METADATA
+
+    db = DatabaseManager(tmp_path / "via_ui_rbac.sqlite")
+    init_database_schema(db)
+    auth = AuthService(db)
+    auth.inicializar_permisos(PERMISOS_BASE)
+    records = RecordsService(db)
+    excel = ExcelService(db)
+
+    # 1. Fail-closed sin función de permisos
+    view_none = ConocimientoViaView(records, excel, usuario_actual={}, tiene_permiso_fn=None)
+    assert not view_none.btn_editar.isEnabled()
+    assert not view_none.btn_autocompletar.isEnabled()
+    assert not view_none.btn_autocompletar_masivo.isEnabled()
+    assert not view_none.btn_sectores.isEnabled()
+    view_none.close()
+
+    # 2. Rol con conocimiento_via.editar pero SIN conocimiento_via.autocompletar_masivo
+    view_solo_editar = ConocimientoViaView(
+        records,
+        excel,
+        usuario_actual={"id": 2, "username": "op"},
+        tiene_permiso_fn=lambda p: p in {"conocimiento_via.ver", "conocimiento_via.editar"},
+    )
+    assert view_solo_editar.btn_editar.isEnabled()
+    assert view_solo_editar.btn_autocompletar.isEnabled()
+    assert not view_solo_editar.btn_autocompletar_masivo.isEnabled()
+    view_solo_editar.close()
+
+    # 3. Rol CON conocimiento_via.autocompletar_masivo
+    view_masivo = ConocimientoViaView(
+        records,
+        excel,
+        usuario_actual={"id": 1, "username": "sup"},
+        tiene_permiso_fn=lambda p: p in {"conocimiento_via.ver", "conocimiento_via.autocompletar_masivo"},
+    )
+    assert view_masivo.btn_autocompletar_masivo.isEnabled()
+    assert not view_masivo.btn_editar.isEnabled()
+    view_masivo.close()
+
+    # 4. Instanciación del diálogo masivo con valores por defecto
+    dlg = AutocompletarMasivoViaDialog(records, usuario_actual={"id": 1, "username": "sup"})
+    assert dlg.chk_no_sobrescribir.isChecked()
+    assert "{itinerario}" in dlg.txt_plantilla_obs.text()
+    assert "{turno}" in dlg.txt_plantilla_obs.text()
+    dlg.close()
+

@@ -64,6 +64,7 @@ PERMISOS_BASE: tuple[str, ...] = (
     "reemplazos.asignar",
     "conocimiento_via.ver",
     "conocimiento_via.editar",
+    "conocimiento_via.autocompletar_masivo",
     "conocimiento_via.administrar",
     "empleados.administrar",
     "empleados.importar",
@@ -324,7 +325,15 @@ PERMISOS_METADATA: dict[str, dict[str, str]] = {
         "titulo": "Registrar y Actualizar Conocimiento de Vía",
         "pestana": "🛤️ Conocimiento de Vía",
         "subpestana": "Matriz de Sectores",
-        "descripcion": "Permite cargar fechas de conocimiento de vía por sector/sentido y ejecutar el autocompletado según el turno asignado.",
+        "descripcion": "Permite cargar fechas de conocimiento de vía por sector/sentido y ejecutar el autocompletado individual según el turno asignado.",
+    },
+    "conocimiento_via.autocompletar_masivo": {
+        "codigo": "conocimiento_via.autocompletar_masivo",
+        "accion": "Editar",
+        "titulo": "Calcular Conocimiento de Vía Masivo por Turno",
+        "pestana": "🛤️ Conocimiento de Vía",
+        "subpestana": "Matriz de Sectores",
+        "descripcion": "Permite ejecutar el cálculo masivo de conocimiento de vía para todo el personal de conducción en una sola operación según su turno asignado e itinerario.",
     },
     "conocimiento_via.administrar": {
         "codigo": "conocimiento_via.administrar",
@@ -589,6 +598,7 @@ ESTRUCTURA_PERMISOS_PESTANAS: tuple[dict[str, Any], ...] = (
                 "permisos": [
                     "conocimiento_via.ver",
                     "conocimiento_via.editar",
+                    "conocimiento_via.autocompletar_masivo",
                     "conocimiento_via.administrar",
                 ],
             },

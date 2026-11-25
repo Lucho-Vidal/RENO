@@ -85,6 +85,36 @@ ESTADOS_CONOCIMIENTO = (
     "SIN_REGISTRO",
 )
 
+PLANTILLA_OBS_TURNO_DEFAULT = (
+    "Se da como conocida ya que en el itinerario {itinerario} el personal tenía el turno {turno}."
+)
+
+
+def formatear_observacion_turno(
+    itinerario: Optional[str],
+    turno: Optional[str],
+    regimen: Optional[str] = "",
+    trenes: Optional[str] = "",
+    plantilla: Optional[str] = None,
+) -> str:
+    """Formatea la observación descriptiva de las condiciones bajo las cuales se otorga el conocimiento.
+
+    Soporta las variables ``{itinerario}``, ``{turno}``, ``{regimen}`` y ``{trenes}`` sin fallar
+    si el usuario ingresa llaves literales o placeholders desconocidos.
+    """
+    base = str(plantilla or "").strip() or PLANTILLA_OBS_TURNO_DEFAULT
+    valores = {
+        "itinerario": str(itinerario or "-").strip() or "-",
+        "turno": str(turno or "-").strip() or "-",
+        "regimen": str(regimen or "").strip() or "Todos",
+        "trenes": str(trenes or "").strip(),
+    }
+    resultado = base
+    for clave, valor in valores.items():
+        resultado = resultado.replace(f"{{{clave}}}", valor)
+    return " ".join(resultado.split()).strip()
+
+
 
 def _norm_texto(valor: Optional[str]) -> str:
     raw = " ".join(str(valor or "").strip().split())
