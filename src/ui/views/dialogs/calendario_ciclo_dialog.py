@@ -52,6 +52,8 @@ class AsignarJornadaDialog(BaseDialog):
         jornada_existente: Optional[Dict[str, Any]] = None,
         franco_agente: str = "Domingo",
         records_service: Optional[RecordsService] = None,
+        deposito_agente: Optional[str] = None,
+        rol_agente: Optional[str] = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -63,6 +65,8 @@ class AsignarJornadaDialog(BaseDialog):
         self.dia_semana = dia_semana
         self.franco_agente = franco_agente
         self.records_service = records_service
+        self.deposito_agente = deposito_agente
+        self.rol_agente = rol_agente
         self.datos_resultado: Optional[Dict[str, Any]] = None
 
         layout = QVBoxLayout(self)
@@ -155,7 +159,10 @@ class AsignarJornadaDialog(BaseDialog):
         if not self.records_service:
             return
 
-        turnos_map = self.records_service.listar_turnos_itinerario_map()
+        turnos_map = self.records_service.listar_turnos_itinerario_map(
+            deposito=self.deposito_agente,
+            rol=self.rol_agente,
+        )
         if not turnos_map:
             QMessageBox.warning(
                 self,
@@ -649,6 +656,8 @@ class CalendarioCicloDialog(BaseMaximizedDialog):
             jornada_existente=dia_info,
             franco_agente=str(self.empleado.get("franco") or "Domingo"),
             records_service=self.records_service,
+            deposito_agente=str(self.empleado.get("dotacion") or "").strip() or None,
+            rol_agente=str(self.empleado.get("especialidad") or "").strip() or None,
             parent=self,
         )
         if dlg.exec():

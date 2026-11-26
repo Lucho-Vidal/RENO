@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from datetime import date, datetime, time, timedelta
 from typing import Any, Sequence
@@ -705,6 +706,113 @@ def resolver_subindice_diagrama_6d(dia_semana_nombre: str, franco_agente_nombre:
         return dia_idx + 1, False
 
 
+def _quitar_acentos_upper(valor: Any) -> str:
+    texto = unicodedata.normalize("NFKD", str(valor or ""))
+    return "".join(c for c in texto if not unicodedata.combining(c)).upper().strip()
+
+
+def normalizar_rol_turno(valor: Any, default: str = "TODOS") -> str:
+    """Normaliza rol/especialidad de turno a 'Conductor', 'Guarda' o 'TODOS'.
+
+    Eléctrico vs Diesel es indistinto para esta clasificación.
+    """
+    raw = str(valor or "").strip()
+    if not raw:
+        return default
+    t = _quitar_acentos_upper(raw)
+    if t in ("TODOS", "TODAS", "ALL", "CUALQUIERA", "SIN DISTINCION") or t.startswith("TODOS"):
+        return "TODOS"
+    if t in ("C", "COND", "CONDUCTOR", "CONDUCCION") or "COND" in t:
+        return "Conductor"
+    if t in ("G", "GD", "GDA", "GUARDA", "GUARDAS") or "GUARDA" in t or re.search(r"\bGD[A]?\b", t):
+        return "Guarda"
+    return default
+
+
+def normalizar_clave_turno(valor: Any) -> str:
+    """Normaliza un código de turno para comparación tolerante entre itinerarios y padrón de empleados.
+
+    Ejemplos que normalizan a la misma clave:
+    - 'Programa 01', 'Programa 1', 'Prog.1', 'Prog,1', 'PROG 01', 'Prog.1CPC', 'Prog,1CSPC' -> 'PROGRAMA 1'
+    - '401,1', '401.1' -> '401.1'
+    """
+    raw = str(valor or "").strip()
+    if not raw:
+        return ""
+    t = _quitar_acentos_upper(raw)
+
+    # Programas en formato limpio o abreviado (Programa 01, Programa 1, Prog.1, Prog,1, PROG 1)
+    m_prog = re.match(
+        r"^(?:PROGRAMA|PROG)[\s.,_-]*0*(\d+)(?:\s*(?:AK|LP|PC|TY|LLV|OA|K5|KM5|RE|CN|CÑ|S|D))?\s*$",
+        t,
+    )
+    if m_prog:
+        return f"PROGRAMA {int(m_prog.group(1))}"
+
+    # Programas en formato legacy concatenado (ej. PROG.1CPC, PROG,1CSPC, PROG.1GLLV, PROG,3CK5)
+    m_legacy = re.match(
+        r"^(?:PROGRAMA|PROG)[\s.,_-]*0*(\d+)[CG](?:[SD])?(?:PC|LLV|TY|LP|OA|K5|KM5|RE|AK|CN|CÑ)?\s*$",
+        t,
+    )
+    if m_legacy:
+        return f"PROGRAMA {int(m_legacy.group(1))}"
+
+    # Turnos numéricos con subíndice decimal (401,1 -> 401.1)
+    if re.match(r"^\d+,\d+$", t):
+        return t.replace(",", ".")
+
+    t = re.sub(r"\s+", " ", t)
+    return t
+
+
+def normalizar_deposito_turno(valor: Any) -> str:
+    """Normaliza la sigla de depósito / dotación (ej. K5/KM5 -> KM5, PLAZA -> PC, TEMPERLEY -> TY)."""
+    raw = str(valor or "").strip()
+    if not raw:
+        return ""
+    t = _quitar_acentos_upper(raw)
+    tokens = set(re.split(r"[^A-Z0-9]+", t))
+    if "KM5" in tokens or "K5" in tokens or "KM 5" in t or "KILO" in t:
+        return "KM5"
+    if "LLV" in tokens or "LLAVALLOL" in t:
+        return "LLV"
+    if "TY" in tokens or "TEMPERLEY" in t or "TEMP" in tokens:
+        return "TY"
+    if "LP" in tokens or "LA PLATA" in t:
+        return "LP"
+    if "OA" in tokens or "TOLOSA" in t:
+        return "OA"
+    if "CN" in tokens or "CANUELAS" in t or "CÑ" in raw.upper():
+        return "CÑ"
+    if "AK" in tokens or "ALEJANDRO KORN" in t or "KORN" in tokens:
+        return "AK"
+    if "RE" in tokens or "ESCALADA" in t:
+        return "RE"
+    if "PC" in tokens or "PLAZA CONSTITUCION" in t or "PLAZA" in tokens:
+        return "PC"
+    return raw.strip().upper()
+
+
+def coincide_rol_empleado(rol_turno: Any, especialidad_empleado: Any) -> bool:
+    """Devuelve True si el rol del turno es compatible con la especialidad del empleado."""
+    r_turno = normalizar_rol_turno(rol_turno, default="TODOS")
+    if r_turno == "TODOS":
+        return True
+    r_emp = normalizar_rol_turno(especialidad_empleado, default="")
+    if not r_emp or r_emp == "TODOS":
+        return False
+    return r_turno == r_emp
+
+
+def coincide_deposito_empleado(deposito_turno: Any, dotacion_empleado: Any) -> bool:
+    """Devuelve True si el depósito del turno coincide con la dotación del empleado."""
+    d_turno = normalizar_deposito_turno(deposito_turno)
+    d_emp = normalizar_deposito_turno(dotacion_empleado)
+    if not d_turno or not d_emp:
+        return True
+    return d_turno == d_emp
+
+
 def resolver_jornada_itinerario(
     turno_base: str,
     fecha_target: date | datetime | str,
@@ -721,6 +829,14 @@ def resolver_jornada_itinerario(
 
     dia_sem_nombre = _DIAS_SEMANA[f_obj.weekday()]
     base_clean = str(turno_base or "").strip().replace(",", ".")
+
+    # Índice tolerante auxiliar por clave normalizada (Programa 01 / Programa 1 / Prog.1)
+    norm_index: dict[str, tuple[str, dict[str, Any]]] = {}
+    for k_raw, v_info in turnos_dict.items():
+        nk = normalizar_clave_turno(k_raw)
+        if nk and nk not in norm_index:
+            norm_index[nk] = (k_raw, v_info)
+    base_norm = normalizar_clave_turno(base_clean)
 
     # 1. Verificar si ya es una clave de variante explícita (ej. '401.3')
     if base_clean in turnos_dict:
@@ -785,6 +901,19 @@ def resolver_jornada_itinerario(
         t_info = turnos_dict[base_clean]
         return {
             "codigo_turno": base_clean,
+            "es_franco": False,
+            "toma": t_info.get("toma_servicio") or "",
+            "deje": t_info.get("deje_servicio") or "",
+            "duracion": t_info.get("duracion_jornada") or "",
+            "tipo_turno": t_info.get("tipo_turno") or "UNIPERSONAL",
+            "deposito": t_info.get("deposito_base") or "",
+            "observaciones": t_info.get("observaciones_turno") or "",
+        }
+
+    if base_norm and base_norm in norm_index:
+        cod_real, t_info = norm_index[base_norm]
+        return {
+            "codigo_turno": cod_real,
             "es_franco": False,
             "toma": t_info.get("toma_servicio") or "",
             "deje": t_info.get("deje_servicio") or "",

@@ -42,6 +42,11 @@ from .validators import (
     dentro_de_ventana_horaria,
     resolver_subindice_diagrama_6d,
     resolver_jornada_itinerario,
+    normalizar_rol_turno,
+    normalizar_clave_turno,
+    normalizar_deposito_turno,
+    coincide_rol_empleado,
+    coincide_deposito_empleado,
 )
 from .estaciones import (
     ESTACIONES_BASE,

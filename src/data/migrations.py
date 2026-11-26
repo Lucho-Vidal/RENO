@@ -280,6 +280,7 @@ def init_database_schema(db: DatabaseManager) -> None:
                 subindice INTEGER,
                 tipo_turno TEXT NOT NULL,
                 deposito_base TEXT NOT NULL,
+                rol TEXT NOT NULL DEFAULT 'TODOS',
                 toma_servicio TEXT,
                 deje_servicio TEXT,
                 duracion_jornada TEXT,
@@ -291,7 +292,7 @@ def init_database_schema(db: DatabaseManager) -> None:
                 sync_status TEXT NOT NULL DEFAULT 'pending',
                 created_at TEXT,
                 updated_at TEXT,
-                UNIQUE(codigo_turno, regimen, itinerario_vigente)
+                UNIQUE(codigo_turno, regimen, itinerario_vigente, deposito_base, rol)
             );
 
             CREATE TABLE IF NOT EXISTS turnos_vueltas (
@@ -687,23 +688,28 @@ def init_database_schema(db: DatabaseManager) -> None:
 
 
 def _asegurar_migracion_turnos_itinerario(db: DatabaseManager) -> None:
-    """Migra tablas legacy de turnos_itinerario (UNIQUE(codigo_turno) -> UNIQUE(codigo_turno, regimen, itinerario_vigente))."""
+    """Migra tablas legacy de turnos_itinerario a rol + UNIQUE(codigo_turno, regimen, itinerario_vigente, deposito_base, rol)."""
+    expected_unique = ["codigo_turno", "regimen", "itinerario_vigente", "deposito_base", "rol"]
     with db.read_connection() as conn:
         cols_ti = {row[1] for row in conn.execute("PRAGMA table_info(turnos_itinerario);").fetchall()}
-        needs_rebuild = "regimen" not in cols_ti
+        needs_rebuild = ("regimen" not in cols_ti) or ("rol" not in cols_ti)
         if not needs_rebuild:
+            has_expected_unique = False
             for idx_row in conn.execute("PRAGMA index_list(turnos_itinerario);").fetchall():
                 if idx_row[2]:
                     idx_name = str(idx_row[1]).replace("'", "''")
                     idx_cols = [c[2] for c in conn.execute(f"PRAGMA index_info('{idx_name}');").fetchall()]
-                    if idx_cols == ["codigo_turno"]:
-                        needs_rebuild = True
+                    if idx_cols == expected_unique:
+                        has_expected_unique = True
                         break
+            if not has_expected_unique:
+                needs_rebuild = True
 
     if not needs_rebuild:
         with db.write_transaction() as conn:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_turnos_itin_regimen ON turnos_itinerario(regimen);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_turnos_itin_vigente ON turnos_itinerario(itinerario_vigente);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_turnos_itin_rol ON turnos_itinerario(rol);")
             conn.execute(
                 """UPDATE turnos_itinerario
                    SET regimen = 'H', sync_status = 'pending', updated_at = datetime('now', 'localtime')
@@ -713,6 +719,8 @@ def _asegurar_migracion_turnos_itinerario(db: DatabaseManager) -> None:
                          WHERE t2.codigo_turno = turnos_itinerario.codigo_turno
                            AND UPPER(TRIM(COALESCE(t2.regimen, ''))) = 'H'
                            AND t2.itinerario_vigente = turnos_itinerario.itinerario_vigente
+                           AND t2.deposito_base = turnos_itinerario.deposito_base
+                           AND t2.rol = turnos_itinerario.rol
                      );"""
             )
         return
@@ -743,6 +751,7 @@ def _asegurar_migracion_turnos_itinerario(db: DatabaseManager) -> None:
         conn.execute("BEGIN IMMEDIATE;")
 
         reg_expr = "COALESCE(NULLIF(TRIM(regimen), ''), 'TODOS')" if "regimen" in cols_ti else "'TODOS'"
+        rol_expr = "COALESCE(NULLIF(TRIM(rol), ''), 'TODOS')" if "rol" in cols_ti else "'TODOS'"
         sync_expr = "COALESCE(sync_status, 'pending')" if "sync_status" in cols_ti else "'pending'"
         ca_expr = "created_at" if "created_at" in cols_ti else "datetime('now', 'localtime')"
         ua_expr = "updated_at" if "updated_at" in cols_ti else "datetime('now', 'localtime')"
@@ -762,6 +771,7 @@ def _asegurar_migracion_turnos_itinerario(db: DatabaseManager) -> None:
                 subindice INTEGER,
                 tipo_turno TEXT NOT NULL,
                 deposito_base TEXT NOT NULL,
+                rol TEXT NOT NULL DEFAULT 'TODOS',
                 toma_servicio TEXT,
                 deje_servicio TEXT,
                 duracion_jornada TEXT,
@@ -773,7 +783,7 @@ def _asegurar_migracion_turnos_itinerario(db: DatabaseManager) -> None:
                 sync_status TEXT NOT NULL DEFAULT 'pending',
                 created_at TEXT,
                 updated_at TEXT,
-                UNIQUE(codigo_turno, regimen, itinerario_vigente)
+                UNIQUE(codigo_turno, regimen, itinerario_vigente, deposito_base, rol)
             );
             """
         )
@@ -800,12 +810,12 @@ def _asegurar_migracion_turnos_itinerario(db: DatabaseManager) -> None:
         conn.execute(
             f"""
             INSERT INTO turnos_itinerario (
-                id, codigo_turno, regimen, turno_base, subindice, tipo_turno, deposito_base,
+                id, codigo_turno, regimen, turno_base, subindice, tipo_turno, deposito_base, rol,
                 toma_servicio, deje_servicio, duracion_jornada, tiempo_toma, tiempo_deje,
                 itinerario_vigente, observaciones_turno, activo, sync_status, created_at, updated_at
             )
             SELECT
-                id, codigo_turno, {reg_expr}, turno_base, subindice, tipo_turno, deposito_base,
+                id, codigo_turno, {reg_expr}, turno_base, subindice, tipo_turno, deposito_base, {rol_expr},
                 toma_servicio, deje_servicio, duracion_jornada, tiempo_toma, tiempo_deje,
                 itinerario_vigente, observaciones_turno, activo, {sync_expr}, {ca_expr}, {ua_expr}
             FROM _tmp_turnos_itinerario_old;
@@ -829,6 +839,7 @@ def _asegurar_migracion_turnos_itinerario(db: DatabaseManager) -> None:
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_turnos_itin_base ON turnos_itinerario(turno_base);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_turnos_itin_deposito ON turnos_itinerario(deposito_base);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_turnos_itin_rol ON turnos_itinerario(rol);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_turnos_itin_regimen ON turnos_itinerario(regimen);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_turnos_itin_vigente ON turnos_itinerario(itinerario_vigente);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_turnos_vueltas_tren ON turnos_vueltas(nro_tren);")
@@ -839,7 +850,7 @@ def _asegurar_migracion_turnos_itinerario(db: DatabaseManager) -> None:
         fk_errs = conn.execute("PRAGMA foreign_key_check;").fetchall()
         if fk_errs:
             raise RuntimeError(f"Error de integridad referencial tras migración de turnos: {fk_errs}")
-        logger.info("Tabla turnos_itinerario migrada exitosamente a clave compuesta (codigo_turno, regimen, itinerario_vigente).")
+        logger.info("Tabla turnos_itinerario migrada exitosamente a clave compuesta (codigo_turno, regimen, itinerario_vigente, deposito_base, rol).")
     except Exception:
         if conn.in_transaction:
             try:

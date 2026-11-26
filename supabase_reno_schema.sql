@@ -235,6 +235,7 @@ CREATE TABLE IF NOT EXISTS reno_turnos_itinerario (
     subindice INTEGER,
     tipo_turno TEXT NOT NULL,
     deposito_base TEXT NOT NULL,
+    rol TEXT NOT NULL DEFAULT 'TODOS',
     toma_servicio TEXT,
     deje_servicio TEXT,
     duracion_jornada TEXT,
@@ -245,10 +246,40 @@ CREATE TABLE IF NOT EXISTS reno_turnos_itinerario (
     activo BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE(codigo_turno, regimen, itinerario_vigente)
+    UNIQUE(codigo_turno, regimen, itinerario_vigente, deposito_base, rol)
 );
 
 ALTER TABLE reno_turnos_itinerario ADD COLUMN IF NOT EXISTS regimen TEXT NOT NULL DEFAULT 'TODOS';
+ALTER TABLE reno_turnos_itinerario ADD COLUMN IF NOT EXISTS rol TEXT NOT NULL DEFAULT 'TODOS';
+
+DO $$
+DECLARE
+    c_name TEXT;
+BEGIN
+    FOR c_name IN
+        SELECT conname
+        FROM pg_constraint
+        WHERE conrelid = 'reno_turnos_itinerario'::regclass
+          AND contype = 'u'
+          AND pg_get_constraintdef(oid) NOT LIKE '%deposito_base, rol%'
+    LOOP
+        EXECUTE format('ALTER TABLE reno_turnos_itinerario DROP CONSTRAINT IF EXISTS %I', c_name);
+    END LOOP;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'reno_turnos_itinerario'::regclass
+          AND contype = 'u'
+          AND pg_get_constraintdef(oid) LIKE '%codigo_turno, regimen, itinerario_vigente, deposito_base, rol%'
+    ) THEN
+        ALTER TABLE reno_turnos_itinerario
+            ADD CONSTRAINT reno_turnos_itinerario_clave_unica
+            UNIQUE (codigo_turno, regimen, itinerario_vigente, deposito_base, rol);
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_reno_turnos_itin_rol ON reno_turnos_itinerario(rol);
 
 -- 2.17 Vueltas y Tramos de Turnos de Itinerario
 CREATE TABLE IF NOT EXISTS reno_turnos_vueltas (

@@ -116,6 +116,15 @@ class AdminTurnosWidget(QWidget):
         self.combo_regimen.currentIndexChanged.connect(lambda _: self.recargar())
         bar_filters.addWidget(self.combo_regimen)
 
+        bar_filters.addWidget(QLabel("Rol:"))
+        self.combo_rol = QComboBox()
+        self.combo_rol.addItem("Todos", "Todos")
+        self.combo_rol.addItem("Conductor", "Conductor")
+        self.combo_rol.addItem("Guarda", "Guarda")
+        self.combo_rol.addItem("TODOS - Sin distinción", "TODOS")
+        self.combo_rol.currentIndexChanged.connect(lambda _: self.recargar())
+        bar_filters.addWidget(self.combo_rol)
+
         bar_filters.addWidget(QLabel("Depósito:"))
         self.combo_deposito = QComboBox()
         self.combo_deposito.setMinimumWidth(95)
@@ -143,11 +152,11 @@ class AdminTurnosWidget(QWidget):
 
         # Tabla de Turnos con selección múltiple (Ctrl+Clic, Shift+Clic, Ctrl+A)
         headers = [
-            "ID", "CÓDIGO TURNO", "DÍA", "TURNO BASE", "SUB", "TIPO TURNO", "DEPÓSITO",
+            "ID", "CÓDIGO TURNO", "DÍA", "ROL", "TURNO BASE", "SUB", "TIPO TURNO", "DEPÓSITO",
             "TOMA", "DEJE", "DURACIÓN", "VUELTAS", "ITIN.", "ESTADO",
         ]
         keys = [
-            "id", "codigo_turno", "regimen_label", "turno_base", "subindice", "tipo_turno", "deposito_base",
+            "id", "codigo_turno", "regimen_label", "rol", "turno_base", "subindice", "tipo_turno", "deposito_base",
             "toma_servicio", "deje_servicio", "duracion_jornada", "cant_vueltas", "itinerario_vigente", "estado_str",
         ]
 
@@ -160,16 +169,17 @@ class AdminTurnosWidget(QWidget):
         self.table.setColumnWidth(0, 55)   # ID
         self.table.setColumnWidth(1, 105)  # CÓDIGO TURNO
         self.table.setColumnWidth(2, 95)   # DÍA
-        self.table.setColumnWidth(3, 85)   # TURNO BASE
-        self.table.setColumnWidth(4, 48)   # SUB
-        self.table.setColumnWidth(5, 115)  # TIPO TURNO
-        self.table.setColumnWidth(6, 75)   # DEPÓSITO
-        self.table.setColumnWidth(7, 65)   # TOMA
-        self.table.setColumnWidth(8, 65)   # DEJE
-        self.table.setColumnWidth(9, 75)   # DURACIÓN
-        self.table.setColumnWidth(10, 68)  # VUELTAS
-        self.table.setColumnWidth(11, 95)  # ITIN
-        self.table.horizontalHeader().setSectionResizeMode(12, QHeaderView.Stretch)  # ESTADO
+        self.table.setColumnWidth(3, 85)   # ROL
+        self.table.setColumnWidth(4, 85)   # TURNO BASE
+        self.table.setColumnWidth(5, 48)   # SUB
+        self.table.setColumnWidth(6, 115)  # TIPO TURNO
+        self.table.setColumnWidth(7, 75)   # DEPÓSITO
+        self.table.setColumnWidth(8, 65)   # TOMA
+        self.table.setColumnWidth(9, 65)   # DEJE
+        self.table.setColumnWidth(10, 75)  # DURACIÓN
+        self.table.setColumnWidth(11, 68)  # VUELTAS
+        self.table.setColumnWidth(12, 95)  # ITIN
+        self.table.horizontalHeader().setSectionResizeMode(13, QHeaderView.Stretch)  # ESTADO
         self.table.doubleClicked.connect(lambda _: self._modificar_turno())
         self.table.selectionModel().selectionChanged.connect(lambda *_: self._actualizar_conteo())
         layout.addWidget(self.table)
@@ -205,26 +215,29 @@ class AdminTurnosWidget(QWidget):
         self.combo_deposito.blockSignals(False)
 
     def _limpiar_filtros(self) -> None:
-        for w in (self.combo_itinerario, self.combo_regimen, self.combo_deposito, self.txt_buscar, self.chk_inactivos):
+        for w in (self.combo_itinerario, self.combo_regimen, self.combo_rol, self.combo_deposito, self.txt_buscar, self.chk_inactivos):
             w.blockSignals(True)
         self.combo_itinerario.setCurrentIndex(0)
         self.combo_regimen.setCurrentIndex(0)
+        self.combo_rol.setCurrentIndex(0)
         self.combo_deposito.setCurrentIndex(0)
         self.txt_buscar.clear()
         self.chk_inactivos.setChecked(True)
-        for w in (self.combo_itinerario, self.combo_regimen, self.combo_deposito, self.txt_buscar, self.chk_inactivos):
+        for w in (self.combo_itinerario, self.combo_regimen, self.combo_rol, self.combo_deposito, self.txt_buscar, self.chk_inactivos):
             w.blockSignals(False)
         self.recargar()
 
     def _filtros_actuales(self) -> Dict[str, Any]:
         iti = self.combo_itinerario.currentText().strip()
         reg = self.combo_regimen.currentData()
+        rol = self.combo_rol.currentData()
         dep = self.combo_deposito.currentText().strip()
         return {
             "criterio": self.txt_buscar.text().strip(),
             "deposito": None if dep in ("", "Todos", "Todas") else dep,
             "itinerario": None if iti in ("", "Todos", "Todas") else iti,
             "regimen": None if reg in (None, "", "Todos", "Todas") else str(reg),
+            "rol": None if rol in (None, "", "Todos", "Todas") else str(rol),
             "incluir_inactivos": self.chk_inactivos.isChecked(),
         }
 
@@ -237,6 +250,7 @@ class AdminTurnosWidget(QWidget):
             deposito=filtros["deposito"],
             itinerario=filtros["itinerario"],
             regimen=filtros["regimen"],
+            rol=filtros["rol"],
             incluir_inactivos=filtros["incluir_inactivos"],
         )
         for t in self._turnos:
@@ -421,6 +435,8 @@ class AdminTurnosWidget(QWidget):
             detalles_filtro.append(f"• Itinerario: {filtros['itinerario']}")
         if filtros["regimen"]:
             detalles_filtro.append(f"• Día: {self.records_service.formatear_regimen_turno(filtros['regimen'])}")
+        if filtros["rol"]:
+            detalles_filtro.append(f"• Rol: {filtros['rol']}")
         if filtros["deposito"]:
             detalles_filtro.append(f"• Depósito: {filtros['deposito']}")
         if filtros["criterio"]:

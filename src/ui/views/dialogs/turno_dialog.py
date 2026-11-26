@@ -227,6 +227,14 @@ class TurnoDialog(BaseDialog):
         self.chk_activo.setChecked(True)
         lay_datos.addWidget(self.chk_activo, 5, 0, 1, 2)
 
+        lay_datos.addWidget(QLabel("Rol:"), 5, 2)
+        self.combo_rol = QComboBox()
+        self.combo_rol.addItem("Conductor", "Conductor")
+        self.combo_rol.addItem("Guarda", "Guarda")
+        self.combo_rol.addItem("TODOS - Sin distinción", "TODOS")
+        self.combo_rol.setCurrentIndex(2)
+        lay_datos.addWidget(self.combo_rol, 5, 3)
+
         lay_datos.addWidget(QLabel("Observaciones:"), 6, 0)
         self.txt_observaciones = QLineEdit()
         self.txt_observaciones.setPlaceholderText("Observaciones operativas del turno")
@@ -367,6 +375,13 @@ class TurnoDialog(BaseDialog):
         else:
             self.combo_regimen.setCurrentIndex(3)
 
+        rol_raw = str(t.get("rol") or "TODOS").strip()
+        idx_rol = self.combo_rol.findData(rol_raw)
+        if idx_rol >= 0:
+            self.combo_rol.setCurrentIndex(idx_rol)
+        else:
+            self.combo_rol.setCurrentIndex(2)
+
         self.chk_activo.setChecked(bool(t.get("activo", 1)))
         self.txt_observaciones.setText(str(t.get("observaciones_turno") or ""))
 
@@ -434,6 +449,7 @@ class TurnoDialog(BaseDialog):
         payload = {
             "codigo_turno": codigo,
             "regimen": self.combo_regimen.currentData() or "TODOS",
+            "rol": self.combo_rol.currentData() or "TODOS",
             "turno_base": base,
             "subindice": sub,
             "tipo_turno": self.combo_tipo.currentText().strip(),

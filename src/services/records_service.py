@@ -38,8 +38,13 @@ from src.domain.validators import (
     DIAS_SEMANA,
     DIAS_SEMANA_NORM,
     calcular_descansos_ciclo,
+    coincide_deposito_empleado,
+    coincide_rol_empleado,
     es_turno_ciclo,
+    normalizar_clave_turno,
+    normalizar_deposito_turno,
     normalizar_dia_semana,
+    normalizar_rol_turno,
     parsear_fecha,
     validar_datos_ordenamiento,
     validar_tramos_reemplazo,
@@ -2743,6 +2748,18 @@ class RecordsService:
             return "OA"
         return "PC"
 
+    @staticmethod
+    def _deducir_rol_turno(rol_raw: str = "", hoja: str = "", archivo: str = "") -> str:
+        """Deduce el rol operativo ('Conductor', 'Guarda' o 'TODOS') desde columna explícita o fallback de hoja/archivo."""
+        if rol_raw and str(rol_raw).strip():
+            return normalizar_rol_turno(rol_raw, default="TODOS")
+        for fuente in (hoja, archivo):
+            if fuente and str(fuente).strip():
+                ded = normalizar_rol_turno(fuente, default="")
+                if ded in ("Conductor", "Guarda"):
+                    return ded
+        return "TODOS"
+
     def importar_itinerario_excel(
         self,
         file_path: str,
@@ -2751,13 +2768,16 @@ class RecordsService:
         user_id: Optional[int] = None,
         windows_user: Optional[str] = None,
     ) -> Tuple[int, int]:
-        """Importa turnos desde Excel en formato completo (turno, dia H/S/D, nombre_itinerario...) o legacy Indice_45."""
+        """Importa turnos desde Excel en formato RENO (turno_normalizado, rol, dotacion, dia), completo o legacy Indice_45."""
         import openpyxl
 
         wb = openpyxl.load_workbook(file_path, data_only=True)
 
         header_aliases = {
+            "turno_normalizado": {"turno_normalizado", "turno_limpio", "turno_reno"},
             "codigo_turno": {"turno", "codigo_turno", "codigo turno", "cod_turno", "cod turno"},
+            "rol": {"rol", "especialidad", "categoria", "puesto"},
+            "dotacion": {"dotacion", "deposito", "deposito_base", "base"},
             "dia": {"dia", "regimen", "tipo_dia", "tipo dia", "servicio", "dia_servicio"},
             "toma": {"toma", "toma_servicio", "hora_toma"},
             "deja": {"deja", "deje", "deje_servicio", "deja_servicio", "hora_deja", "hora_deje"},
@@ -2770,7 +2790,7 @@ class RecordsService:
             "llega": {"llega", "llegada", "hora_llegada", "h_llegada"},
             "observaciones": {"observaciones", "observacion", "obs", "observaciones_tramo", "obs_tramo"},
             "nombre_itinerario": {"nombre_itinerario", "itinerario", "itinerario_vigente", "itin", "circ_iti"},
-            "nombre_hoja": {"nombre_hoja", "hoja", "deposito", "deposito_base"},
+            "nombre_hoja": {"nombre_hoja", "hoja"},
             "nombre_archivo": {"nombre_archivo", "archivo"},
         }
         alias_to_field = {
@@ -2787,7 +2807,7 @@ class RecordsService:
                     field = alias_to_field.get(h_norm)
                     if field and field not in cmap:
                         cmap[field] = c
-                if "codigo_turno" in cmap and len(
+                if ("turno_normalizado" in cmap or "codigo_turno" in cmap) and len(
                     {"toma", "deja", "vuelta", "tren", "origen", "destino"} & set(cmap.keys())
                 ) >= 2:
                     return r, cmap
@@ -2825,7 +2845,7 @@ class RecordsService:
             "nombre_hoja": 13,
         }
 
-        filas_por_turno: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
+        filas_por_turno: Dict[Tuple[str, str, str, str, str], List[Dict[str, Any]]] = {}
 
         for ws, start_row, col_map in hojas_a_procesar:
             cmap_use = col_map if col_map is not None else legacy_pos
@@ -2840,21 +2860,33 @@ class RecordsService:
                 sheet_reg_hint = "H"
 
             for row in range(start_row, ws.max_row + 1):
-                c_turno = cmap_use.get("codigo_turno", 1)
-                t_raw = ws.cell(row, c_turno).value
-                codigo_turno = self._formatear_texto_celda(t_raw, reemplazar_coma=True)
-                if not codigo_turno:
-                    continue
-
                 def _get_val(field_name: str):
                     col_i = cmap_use.get(field_name)
                     return ws.cell(row, col_i).value if col_i else None
+
+                t_norm_raw = _get_val("turno_normalizado")
+                t_raw = _get_val("codigo_turno")
+                codigo_turno = self._formatear_texto_celda(t_norm_raw, reemplazar_coma=True)
+                if not codigo_turno:
+                    codigo_turno = self._formatear_texto_celda(t_raw, reemplazar_coma=True)
+                if not codigo_turno:
+                    continue
 
                 toma = self._formatear_hora_celda(_get_val("toma"))
                 deja = self._formatear_hora_celda(_get_val("deja"))
 
                 hoja = self._formatear_texto_celda(_get_val("nombre_hoja"))
                 archivo = self._formatear_texto_celda(_get_val("nombre_archivo"))
+                dotacion_raw = self._formatear_texto_celda(_get_val("dotacion"))
+                rol_raw = self._formatear_texto_celda(_get_val("rol"))
+
+                deposito_val = (
+                    normalizar_deposito_turno(dotacion_raw)
+                    if dotacion_raw
+                    else self._deducir_deposito_turno(hoja, archivo)
+                )
+                rol_val = self._deducir_rol_turno(rol_raw, hoja, archivo)
+
                 nom_itin = self._formatear_texto_celda(_get_val("nombre_itinerario"))
                 itinerario_val = (itinerario_nombre or nom_itin or "Dic25").strip() or "Dic25"
 
@@ -2877,7 +2909,7 @@ class RecordsService:
                 else:
                     regimen_val = self.normalizar_regimen_turno(regimen_default or "TODOS", default="TODOS")
 
-                group_key = (codigo_turno, regimen_val, itinerario_val)
+                group_key = (codigo_turno, regimen_val, itinerario_val, deposito_val, rol_val)
 
                 nro_vuelta_raw = _get_val("vuelta")
                 try:
@@ -2901,6 +2933,8 @@ class RecordsService:
                 item = {
                     "codigo_turno": codigo_turno,
                     "regimen": regimen_val,
+                    "deposito": deposito_val,
+                    "rol": rol_val,
                     "toma": toma,
                     "deja": deja,
                     "nro_vuelta": nro_vuelta,
@@ -2921,22 +2955,22 @@ class RecordsService:
         vueltas_guardadas = 0
 
         with self.db.write_transaction() as conn:
-            for (cod, regimen_val, itinerario), vueltas in filas_por_turno.items():
+            for (cod, regimen_val, itinerario, deposito, rol_val), vueltas in filas_por_turno.items():
                 v0 = vueltas[0]
                 toma = v0["toma"]
                 deja = v0["deja"]
-                deposito = self._deducir_deposito_turno(v0.get("hoja", ""), v0.get("archivo", ""))
 
+                cod_up = cod.upper()
                 m = re.match(r"^(\d+)\.(\d+)$", cod)
                 if m:
                     base = m.group(1)
                     subindice = int(m.group(2))
                     tipo_turno = "DIAGRAMA_6D"
-                elif cod.startswith("PROG") or "PROG" in cod:
+                elif cod_up.startswith("PROG") or "PROG" in cod_up:
                     base = cod
                     subindice = None
                     tipo_turno = "PROGRAMA"
-                elif "ORD" in cod or "DH" in cod:
+                elif "ORD" in cod_up or "DH" in cod_up:
                     base = cod
                     subindice = None
                     tipo_turno = "FRANQUERO"
@@ -2959,27 +2993,28 @@ class RecordsService:
 
                 conn.execute(
                     """INSERT INTO turnos_itinerario
-                       (codigo_turno, regimen, turno_base, subindice, tipo_turno, deposito_base,
+                       (codigo_turno, regimen, turno_base, subindice, tipo_turno, deposito_base, rol,
                         toma_servicio, deje_servicio, duracion_jornada, itinerario_vigente,
                         observaciones_turno, activo, sync_status, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 1, 'pending', datetime('now', 'localtime'), datetime('now', 'localtime'))
-                       ON CONFLICT(codigo_turno, regimen, itinerario_vigente) DO UPDATE SET
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 1, 'pending', datetime('now', 'localtime'), datetime('now', 'localtime'))
+                       ON CONFLICT(codigo_turno, regimen, itinerario_vigente, deposito_base, rol) DO UPDATE SET
                         turno_base = excluded.turno_base,
                         subindice = excluded.subindice,
                         tipo_turno = excluded.tipo_turno,
-                        deposito_base = excluded.deposito_base,
                         toma_servicio = excluded.toma_servicio,
                         deje_servicio = excluded.deje_servicio,
                         duracion_jornada = excluded.duracion_jornada,
                         activo = 1,
                         sync_status = 'pending',
                         updated_at = datetime('now', 'localtime');""",
-                    (cod, regimen_val, base, subindice, tipo_turno, deposito, toma, deja, duracion, itinerario),
+                    (cod, regimen_val, base, subindice, tipo_turno, deposito, rol_val, toma, deja, duracion, itinerario),
                 )
 
                 turno_row = conn.execute(
-                    "SELECT id FROM turnos_itinerario WHERE codigo_turno = ? AND regimen = ? AND itinerario_vigente = ?;",
-                    (cod, regimen_val, itinerario),
+                    """SELECT id FROM turnos_itinerario
+                       WHERE codigo_turno = ? AND regimen = ? AND itinerario_vigente = ?
+                         AND deposito_base = ? AND rol = ?;""",
+                    (cod, regimen_val, itinerario, deposito, rol_val),
                 ).fetchone()
                 turno_id = turno_row[0]
                 turnos_guardados += 1
@@ -3036,6 +3071,7 @@ class RecordsService:
                     v.nro_tren,
                     ti.codigo_turno,
                     COALESCE(NULLIF(TRIM(ti.regimen), ''), 'TODOS') AS regimen,
+                    COALESCE(NULLIF(TRIM(ti.rol), ''), 'TODOS') AS rol,
                     ti.turno_base,
                     ti.tipo_turno,
                     ti.deposito_base,
@@ -3067,12 +3103,17 @@ class RecordsService:
         self,
         regimen: Optional[str] = None,
         itinerario: Optional[str] = None,
+        deposito: Optional[str] = None,
+        rol: Optional[str] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """Devuelve un mapa indexado por codigo_turno para resolución ultra-rápida."""
         reg_target = self.normalizar_regimen_turno(regimen, default="TODOS") if regimen else None
+        dep_target = normalizar_deposito_turno(deposito) if deposito and str(deposito).strip() not in ("", "Todos", "Todas") else ""
+        rol_target = normalizar_rol_turno(rol, default="TODOS") if rol and str(rol).strip() not in ("", "Todos", "Todas") else ""
 
         with self.db.read_connection() as conn:
             query = """SELECT id, codigo_turno, COALESCE(NULLIF(TRIM(regimen), ''), 'TODOS') AS regimen,
+                              COALESCE(NULLIF(TRIM(rol), ''), 'TODOS') AS rol,
                               turno_base, subindice, tipo_turno, deposito_base, toma_servicio,
                               deje_servicio, duracion_jornada, itinerario_vigente, observaciones_turno
                        FROM turnos_itinerario WHERE activo = 1"""
@@ -3083,25 +3124,44 @@ class RecordsService:
             query += " ORDER BY id DESC;"
             rows = [dict(r) for r in conn.execute(query, params).fetchall()]
 
-        def _score_reg(r_val: str) -> int:
-            rv = str(r_val or "TODOS").strip().upper()
+        def _score_row(r: Dict[str, Any]) -> Tuple[int, int, int]:
+            # Prioridad 1: rol coincidente > TODOS > otro
+            r_rol = normalizar_rol_turno(r.get("rol"), default="TODOS")
+            if rol_target in ("Conductor", "Guarda"):
+                s_rol = 0 if r_rol == rol_target else (1 if r_rol == "TODOS" else 2)
+            else:
+                s_rol = 0
+
+            # Prioridad 2: depósito coincidente > otro
+            r_dep = normalizar_deposito_turno(r.get("deposito_base"))
+            if dep_target:
+                s_dep = 0 if r_dep == dep_target else 1
+            else:
+                s_dep = 0
+
+            # Prioridad 3: régimen
+            rv = str(r.get("regimen") or "TODOS").strip().upper()
             if reg_target in ("H", "S", "D"):
                 if rv == reg_target:
-                    return 0
+                    s_reg = 0
+                elif rv in ("", "TODOS", "ALL"):
+                    s_reg = 1
+                elif rv == "H":
+                    s_reg = 2
+                else:
+                    s_reg = 3
+            else:
                 if rv in ("", "TODOS", "ALL"):
-                    return 1
-                if rv == "H":
-                    return 2
-                return 3
-            if rv in ("", "TODOS", "ALL"):
-                return 0
-            if rv == "H":
-                return 1
-            if rv == "S":
-                return 2
-            return 3
+                    s_reg = 0
+                elif rv == "H":
+                    s_reg = 1
+                elif rv == "S":
+                    s_reg = 2
+                else:
+                    s_reg = 3
+            return (s_rol, s_dep, s_reg)
 
-        rows.sort(key=lambda r: _score_reg(r.get("regimen", "TODOS")))
+        rows.sort(key=_score_row)
         mapa: Dict[str, Dict[str, Any]] = {}
         for r in rows:
             cod = r["codigo_turno"]
@@ -3160,77 +3220,90 @@ class RecordsService:
         codigo_turno: str,
         itinerario: Optional[str] = None,
         regimen: Optional[str] = None,
+        deposito: Optional[str] = None,
+        rol: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Busca un turno por su código (ej: '401.1' o '401') y opcionalmente por itinerario y día/régimen."""
+        """Busca un turno por su código (ej: '401.1', '401', 'Programa 01', 'Prog.1') filtrando opcionalmente por itinerario, régimen, depósito y rol."""
         cod = str(codigo_turno or "").strip()
         if not cod:
             return None
+        cod_norm = normalizar_clave_turno(cod)
         reg_norm = self.normalizar_regimen_turno(regimen, default="TODOS") if regimen else None
+        dep_norm = normalizar_deposito_turno(deposito) if deposito and str(deposito).strip() not in ("", "Todos", "Todas") else ""
+        rol_norm = normalizar_rol_turno(rol, default="TODOS") if rol and str(rol).strip() not in ("", "Todos", "Todas") else ""
 
         with self.db.read_connection() as conn:
             query = """
                 SELECT id, codigo_turno, COALESCE(NULLIF(TRIM(regimen), ''), 'TODOS') AS regimen,
+                       COALESCE(NULLIF(TRIM(rol), ''), 'TODOS') AS rol,
                        turno_base, subindice, tipo_turno, deposito_base,
                        toma_servicio, deje_servicio, duracion_jornada, tiempo_toma, tiempo_deje,
                        itinerario_vigente, observaciones_turno, activo
                 FROM turnos_itinerario
-                WHERE activo = 1 AND (codigo_turno = ? OR turno_base = ?)
+                WHERE activo = 1
             """
-            params: List[Any] = [cod, cod]
+            params: List[Any] = []
             if itinerario and str(itinerario).strip() not in ("Todos", "Todas", ""):
                 query += " AND itinerario_vigente = ?"
                 params.append(str(itinerario).strip())
+            query += " ORDER BY itinerario_vigente DESC, id DESC;"
+            all_rows = [dict(r) for r in conn.execute(query, params).fetchall()]
 
-            if reg_norm in ("H", "S", "D"):
-                query += """
-                    ORDER BY
-                        CASE UPPER(TRIM(COALESCE(regimen, 'TODOS')))
-                            WHEN ? THEN 0
-                            WHEN 'TODOS' THEN 1
-                            WHEN '' THEN 1
-                            WHEN 'H' THEN 2
-                            ELSE 3
-                        END ASC,
-                        itinerario_vigente DESC,
-                        id DESC
-                    LIMIT 1;
-                """
-                params.append(reg_norm)
-            elif reg_norm == "TODOS":
-                query += """
-                    ORDER BY
-                        CASE UPPER(TRIM(COALESCE(regimen, 'TODOS')))
-                            WHEN 'TODOS' THEN 0
-                            WHEN '' THEN 0
-                            WHEN 'H' THEN 1
-                            WHEN 'S' THEN 2
-                            ELSE 3
-                        END ASC,
-                        itinerario_vigente DESC,
-                        id DESC
-                    LIMIT 1;
-                """
+        candidatos = []
+        for r in all_rows:
+            c_cod = str(r.get("codigo_turno") or "").strip()
+            c_base = str(r.get("turno_base") or "").strip()
+            es_exacto = (c_cod == cod or c_base == cod)
+            es_tolerante = (
+                cod_norm != ""
+                and (normalizar_clave_turno(c_cod) == cod_norm or normalizar_clave_turno(c_base) == cod_norm)
+            )
+            if es_exacto or es_tolerante:
+                r["_exacto"] = 0 if es_exacto else 1
+                candidatos.append(r)
+
+        if not candidatos:
+            return None
+
+        def _score(r: Dict[str, Any]) -> Tuple[int, int, int, int, str, int]:
+            # Rol: exacto > TODOS > distinto
+            r_rol = normalizar_rol_turno(r.get("rol"), default="TODOS")
+            if rol_norm in ("Conductor", "Guarda"):
+                s_rol = 0 if r_rol == rol_norm else (1 if r_rol == "TODOS" else 2)
             else:
-                query += """
-                    ORDER BY
-                        CASE UPPER(TRIM(COALESCE(regimen, 'TODOS')))
-                            WHEN 'H' THEN 0
-                            WHEN 'TODOS' THEN 1
-                            WHEN '' THEN 1
-                            WHEN 'S' THEN 2
-                            ELSE 3
-                        END ASC,
-                        itinerario_vigente DESC,
-                        id DESC
-                    LIMIT 1;
-                """
-            row = conn.execute(query, params).fetchone()
-            if not row:
-                return None
-            res = dict(row)
-            res["regimen_label"] = self.formatear_regimen_turno(res.get("regimen"))
-            res["vueltas"] = self.obtener_vueltas_de_turno(res["id"])
-            return res
+                s_rol = 0
+
+            # Depósito: exacto > distinto
+            r_dep = normalizar_deposito_turno(r.get("deposito_base"))
+            if dep_norm:
+                s_dep = 0 if r_dep == dep_norm else 1
+            else:
+                s_dep = 0
+
+            # Régimen
+            rv = str(r.get("regimen") or "TODOS").strip().upper()
+            if reg_norm in ("H", "S", "D"):
+                s_reg = 0 if rv == reg_norm else (1 if rv in ("", "TODOS") else (2 if rv == "H" else 3))
+            elif reg_norm == "TODOS":
+                s_reg = 0 if rv in ("", "TODOS") else (1 if rv == "H" else (2 if rv == "S" else 3))
+            else:
+                s_reg = 0 if rv == "H" else (1 if rv in ("", "TODOS") else (2 if rv == "S" else 3))
+
+            return (
+                s_rol,
+                s_dep,
+                s_reg,
+                r["_exacto"],
+                "",  # mantener orden SQL previo (itinerario_vigente DESC, id DESC)
+                -int(r["id"]),
+            )
+
+        candidatos.sort(key=_score)
+        res = dict(candidatos[0])
+        res.pop("_exacto", None)
+        res["regimen_label"] = self.formatear_regimen_turno(res.get("regimen"))
+        res["vueltas"] = self.obtener_vueltas_de_turno(res["id"])
+        return res
 
     def buscar_turnos_con_cobertura(
         self,
@@ -3238,8 +3311,10 @@ class RecordsService:
         fecha_target_iso: str,
         tipo_dia: str = "HABIL",
         itinerarios: Optional[List[str]] = None,
+        rol: Optional[str] = None,
+        deposito: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Búsqueda dual (por tren o por turno) filtrando por día H/S/D y resolviendo titular/cobertura."""
+        """Búsqueda dual (por tren o por turno) filtrando por día H/S/D, rol y depósito, resolviendo titular/cobertura."""
         crit_clean = str(criterio or "").strip()
         if not crit_clean:
             return []
@@ -3249,9 +3324,13 @@ class RecordsService:
             f_obj = date.today()
         dia_sem_nom = DIAS_SEMANA[f_obj.weekday()]
         reg_target = self.normalizar_regimen_turno(tipo_dia, default="TODOS")
+        rol_target = normalizar_rol_turno(rol, default="TODOS") if rol and str(rol).strip() not in ("", "Todos", "Todas") else None
+        dep_target = normalizar_deposito_turno(deposito) if deposito and str(deposito).strip() not in ("", "Todos", "Todas") else None
+
+        crit_norm_turno = normalizar_clave_turno(crit_clean)
 
         with self.db.read_connection() as conn:
-            # 1. Identificar turnos candidatos según criterio dual + día/itinerario
+            # 1. Identificar turnos candidatos según criterio dual + día/itinerario/rol/depósito
             where_clauses = ["ti.activo = 1"]
             params: List[Any] = []
 
@@ -3261,6 +3340,16 @@ class RecordsService:
                 )
                 params.append(reg_target)
 
+            if rol_target in ("Conductor", "Guarda"):
+                where_clauses.append(
+                    "(COALESCE(NULLIF(TRIM(ti.rol), ''), 'TODOS') = ? OR COALESCE(NULLIF(TRIM(ti.rol), ''), 'TODOS') = 'TODOS')"
+                )
+                params.append(rol_target)
+
+            if dep_target:
+                where_clauses.append("UPPER(TRIM(COALESCE(ti.deposito_base, ''))) = ?")
+                params.append(dep_target)
+
             if itinerarios:
                 placeholders = ",".join("?" for _ in itinerarios)
                 where_clauses.append(f"ti.itinerario_vigente IN ({placeholders})")
@@ -3268,36 +3357,59 @@ class RecordsService:
 
             if crit_clean:
                 crit_normalizado = crit_clean.replace(",", ".")
-                where_clauses.append("""(
-                    ti.codigo_turno LIKE ? OR
+                extra_patterns = [f"%{crit_normalizado}%"]
+                # Si el usuario busca 'Prog.1', 'Programa 1' o 'Programa 01', cubrir variantes equivalentes en SQL
+                m_prog_crit = re.match(r"^(?:PROGRAMA|PROG)[\s.,_-]*0*(\d+)$", crit_norm_turno)
+                if m_prog_crit:
+                    num_p = int(m_prog_crit.group(1))
+                    extra_patterns.extend([
+                        f"%Programa {num_p:02d}%",
+                        f"%Programa {num_p}%",
+                        f"%Prog.{num_p}%",
+                        f"%Prog,{num_p}%",
+                    ])
+                extra_patterns = list(dict.fromkeys(extra_patterns))
+                like_sql = " OR ".join("ti.codigo_turno LIKE ? OR ti.turno_base LIKE ?" for _ in extra_patterns)
+                like_params: List[Any] = []
+                for pat in extra_patterns:
+                    like_params.extend([pat, pat])
+
+                where_clauses.append(f"""(
+                    {like_sql} OR
                     ti.turno_base = ? OR
                     EXISTS (
                         SELECT 1 FROM turnos_vueltas tv
                         WHERE tv.turno_id = ti.id AND (tv.nro_tren = ? OR tv.nro_tren LIKE ?)
                     )
                 )""")
-                params.extend([f"%{crit_normalizado}%", crit_clean, crit_clean, f"%{crit_clean}%"])
+                params.extend(like_params)
+                params.extend([crit_clean, crit_clean, f"%{crit_clean}%"])
 
             query = f"""
                 SELECT DISTINCT
                     ti.id, ti.codigo_turno, COALESCE(NULLIF(TRIM(ti.regimen), ''), 'TODOS') AS regimen,
+                    COALESCE(NULLIF(TRIM(ti.rol), ''), 'TODOS') AS rol,
                     ti.turno_base, ti.subindice, ti.tipo_turno,
                     ti.deposito_base, ti.toma_servicio, ti.deje_servicio, ti.duracion_jornada,
                     ti.itinerario_vigente, ti.observaciones_turno
                 FROM turnos_itinerario ti
                 WHERE {" AND ".join(where_clauses)}
-                ORDER BY ti.turno_base ASC, ti.subindice ASC, ti.codigo_turno ASC, ti.itinerario_vigente ASC, ti.regimen ASC
+                ORDER BY ti.turno_base ASC, ti.subindice ASC, ti.codigo_turno ASC, ti.deposito_base ASC, ti.rol ASC, ti.itinerario_vigente ASC, ti.regimen ASC
                 LIMIT 300;
             """
             turnos_candidatos = [dict(r) for r in conn.execute(query, params).fetchall()]
 
-            # 2. Precargar conductores en dotación para asignar titular
-            conductores = [
+            # 2. Precargar todo el personal activo (Conductores y Guardas, Eléctrico/Diesel indistinto)
+            empleados_activos = [
                 dict(r) for r in conn.execute(
-                    """SELECT legajo, apellidos_nombres, dotacion, turnos, franco
-                       FROM empleados WHERE activo = 1 AND LOWER(especialidad) LIKE '%conductor%';"""
+                    """SELECT legajo, apellidos_nombres, especialidad, dotacion, turnos, franco
+                       FROM empleados WHERE activo = 1;"""
                 ).fetchall()
             ]
+            for emp in empleados_activos:
+                emp["_turno_norm"] = normalizar_clave_turno(emp.get("turnos"))
+                emp["_dep_norm"] = normalizar_deposito_turno(emp.get("dotacion"))
+                emp["_rol_norm"] = normalizar_rol_turno(emp.get("especialidad"), default="")
 
             # 3. Precargar novedades y reemplazos activos en la fecha evaluando rangos en Python
             raw_novedades = [
@@ -3414,37 +3526,57 @@ class RecordsService:
                     ct = str(o.get("ciclo_o_turno") or "").strip()
                     if ct:
                         ords_por_turno[ct.upper()] = o
+                        ct_norm = normalizar_clave_turno(ct)
+                        if ct_norm:
+                            ords_por_turno[ct_norm] = o
                     for tr_num in str(o.get("trenes_str") or "").split(","):
                         tr_c = tr_num.strip()
                         if tr_c:
                             ords_por_tren.setdefault(tr_c, []).append(o)
 
-            # 4. Resolver titular y cobertura para cada turno
+            # 4. Resolver titular y cobertura para cada turno respetando rol, depósito y normalización tolerante
             from src.domain.validators import resolver_subindice_diagrama_6d
 
             resultados = []
             for t in turnos_candidatos:
                 base = str(t["turno_base"])
+                cod_t = str(t["codigo_turno"])
+                base_norm = normalizar_clave_turno(base)
+                cod_norm = normalizar_clave_turno(cod_t)
                 sub = t["subindice"]
                 tipo = t["tipo_turno"]
+                t_rol = t.get("rol") or "TODOS"
+                t_dep = t.get("deposito_base") or ""
+
+                # Filtrar empleados compatibles en rol y dotación
+                emp_compatibles = [
+                    e for e in empleados_activos
+                    if coincide_rol_empleado(t_rol, e.get("especialidad"))
+                    and coincide_deposito_empleado(t_dep, e.get("dotacion"))
+                ]
 
                 titular_encontrado: Optional[Dict[str, Any]] = None
 
                 if tipo == "DIAGRAMA_6D" and sub is not None:
-                    for c in conductores:
-                        if c["turnos"] == base:
+                    for c in emp_compatibles:
+                        if c["_turno_norm"] == base_norm or c["turnos"] == base:
                             sub_calc, es_f = resolver_subindice_diagrama_6d(dia_sem_nom, c.get("franco") or "")
                             if not es_f and sub_calc == sub:
                                 titular_encontrado = c
                                 break
                     if not titular_encontrado:
-                        for c in conductores:
-                            if c["turnos"] == base:
+                        for c in emp_compatibles:
+                            if c["_turno_norm"] == base_norm or c["turnos"] == base:
                                 titular_encontrado = c
                                 break
                 else:
-                    for c in conductores:
-                        if c["turnos"] == base or c["turnos"] == t["codigo_turno"]:
+                    claves_validas = {k for k in (base_norm, cod_norm) if k}
+                    for c in emp_compatibles:
+                        if (
+                            c["turnos"] == base
+                            or c["turnos"] == cod_t
+                            or (c["_turno_norm"] and c["_turno_norm"] in claves_validas)
+                        ):
                             titular_encontrado = c
                             break
 
@@ -3453,8 +3585,9 @@ class RecordsService:
                 estado_alerta = "OK"
 
                 ord_match = (
-                    ords_por_turno.get(str(t["codigo_turno"]).upper())
+                    ords_por_turno.get(cod_t.upper())
                     or ords_por_turno.get(base.upper())
+                    or (ords_por_turno.get(cod_norm) if cod_norm else None)
                 )
                 if not ord_match and crit_clean in ords_por_tren:
                     ord_match = ords_por_tren[crit_clean][0]
@@ -3562,6 +3695,7 @@ class RecordsService:
         deposito: Optional[str] = None,
         itinerario: Optional[str] = None,
         regimen: Optional[str] = None,
+        rol: Optional[str] = None,
         incluir_inactivos: bool = True,
     ) -> Tuple[str, List[Any]]:
         clauses = ["1=1"]
@@ -3583,12 +3717,35 @@ class RecordsService:
             else:
                 clauses.append("UPPER(TRIM(COALESCE(ti.regimen, ''))) = ?")
                 params.append(reg_norm)
+        if rol and str(rol).strip() not in ("Todas", "Todos", ""):
+            rol_raw = str(rol).strip()
+            rol_key = rol_raw.split("-")[0].strip().upper()
+            rol_norm = "TODOS" if rol_key == "TODOS" else normalizar_rol_turno(rol_raw, default="TODOS")
+            if rol_norm == "TODOS":
+                clauses.append("UPPER(TRIM(COALESCE(ti.rol, ''))) IN ('', 'TODOS')")
+            else:
+                clauses.append("COALESCE(NULLIF(TRIM(ti.rol), ''), 'TODOS') = ?")
+                params.append(rol_norm)
         if criterio and criterio.strip():
             c_clean = criterio.strip()
             c_norm = c_clean.replace(",", ".")
-            c_like = f"%{c_norm}%"
-            clauses.append("(ti.codigo_turno LIKE ? OR ti.turno_base LIKE ? OR ti.observaciones_turno LIKE ?)")
-            params.extend([c_like, f"%{c_clean}%", f"%{c_clean}%"])
+            c_key = normalizar_clave_turno(c_clean)
+            extra_pats = [f"%{c_norm}%"]
+            m_p = re.match(r"^(?:PROGRAMA|PROG)[\s.,_-]*0*(\d+)$", c_key)
+            if m_p:
+                num_p = int(m_p.group(1))
+                extra_pats.extend([
+                    f"%Programa {num_p:02d}%",
+                    f"%Programa {num_p}%",
+                    f"%Prog.{num_p}%",
+                    f"%Prog,{num_p}%",
+                ])
+            extra_pats = list(dict.fromkeys(extra_pats))
+            like_parts = [f"ti.codigo_turno LIKE ? OR ti.turno_base LIKE ?" for _ in extra_pats]
+            for pat in extra_pats:
+                params.extend([pat, pat])
+            clauses.append(f"({' OR '.join(like_parts)} OR ti.observaciones_turno LIKE ?)")
+            params.append(f"%{c_clean}%")
         return " AND ".join(clauses), params
 
     def listar_turnos_admin(
@@ -3597,26 +3754,29 @@ class RecordsService:
         deposito: Optional[str] = None,
         itinerario: Optional[str] = None,
         regimen: Optional[str] = None,
+        rol: Optional[str] = None,
         incluir_inactivos: bool = True,
         limite: int = 10000,
     ) -> List[Dict[str, Any]]:
-        """Lista los turnos de itinerario con conteo de vueltas y filtros por depósito, itinerario y día H/S/D."""
+        """Lista los turnos de itinerario con conteo de vueltas y filtros por depósito, itinerario, rol y día H/S/D."""
         where_sql, params = self._build_turnos_admin_where(
             criterio=criterio,
             deposito=deposito,
             itinerario=itinerario,
             regimen=regimen,
+            rol=rol,
             incluir_inactivos=incluir_inactivos,
         )
         query = f"""
             SELECT ti.id, ti.codigo_turno, COALESCE(NULLIF(TRIM(ti.regimen), ''), 'TODOS') AS regimen,
+                   COALESCE(NULLIF(TRIM(ti.rol), ''), 'TODOS') AS rol,
                    ti.turno_base, ti.subindice, ti.tipo_turno,
                    ti.deposito_base, ti.toma_servicio, ti.deje_servicio, ti.duracion_jornada,
                    ti.itinerario_vigente, ti.observaciones_turno, ti.activo,
                    (SELECT COUNT(*) FROM turnos_vueltas tv WHERE tv.turno_id = ti.id) AS cant_vueltas
             FROM turnos_itinerario ti
             WHERE {where_sql}
-            ORDER BY ti.itinerario_vigente ASC, ti.regimen ASC, ti.turno_base ASC, ti.subindice ASC, ti.codigo_turno ASC
+            ORDER BY ti.itinerario_vigente ASC, ti.regimen ASC, ti.rol ASC, ti.deposito_base ASC, ti.turno_base ASC, ti.subindice ASC, ti.codigo_turno ASC
             LIMIT ?
         """
         params.append(int(limite))
@@ -3636,6 +3796,7 @@ class RecordsService:
         deposito: Optional[str] = None,
         itinerario: Optional[str] = None,
         regimen: Optional[str] = None,
+        rol: Optional[str] = None,
         incluir_inactivos: bool = True,
     ) -> int:
         """Devuelve la cantidad exacta de turnos que cumplen los filtros indicados."""
@@ -3644,6 +3805,7 @@ class RecordsService:
             deposito=deposito,
             itinerario=itinerario,
             regimen=regimen,
+            rol=rol,
             incluir_inactivos=incluir_inactivos,
         )
         with self.db.read_connection() as conn:
@@ -3661,6 +3823,7 @@ class RecordsService:
                 return None
             res = dict(t)
             res["regimen"] = res.get("regimen") or "TODOS"
+            res["rol"] = res.get("rol") or "TODOS"
             res["regimen_label"] = self.formatear_regimen_turno(res["regimen"])
             vueltas = conn.execute(
                 "SELECT * FROM turnos_vueltas WHERE turno_id = ? ORDER BY nro_vuelta ASC",
@@ -3684,29 +3847,32 @@ class RecordsService:
         if not base:
             base = codigo.split(".")[0]
 
-        deposito = str(payload.get("deposito_base") or "PC").strip()
+        deposito = normalizar_deposito_turno(payload.get("deposito_base") or "PC") or "PC"
         tipo = str(payload.get("tipo_turno") or "DIAGRAMA_6D").strip()
         itinerario = str(payload.get("itinerario_vigente") or "45").strip()
         regimen = self.normalizar_regimen_turno(payload.get("regimen") or payload.get("dia") or "TODOS", default="TODOS")
+        rol = normalizar_rol_turno(payload.get("rol") or "TODOS", default="TODOS")
 
         with self.db.write_transaction() as conn:
             exist = conn.execute(
-                "SELECT id FROM turnos_itinerario WHERE codigo_turno = ? AND regimen = ? AND itinerario_vigente = ?",
-                (codigo, regimen, itinerario),
+                """SELECT id FROM turnos_itinerario
+                   WHERE codigo_turno = ? AND regimen = ? AND itinerario_vigente = ?
+                     AND deposito_base = ? AND rol = ?""",
+                (codigo, regimen, itinerario, deposito, rol),
             ).fetchone()
             if exist:
                 raise ValueError(
-                    f"Ya existe el turno '{codigo}' para el día '{self.formatear_regimen_turno(regimen)}' e itinerario '{itinerario}'."
+                    f"Ya existe el turno '{codigo}' para '{self.formatear_regimen_turno(regimen)}', depósito '{deposito}', rol '{rol}' e itinerario '{itinerario}'."
                 )
 
             cur = conn.execute(
                 """INSERT INTO turnos_itinerario (
-                    codigo_turno, regimen, turno_base, subindice, tipo_turno, deposito_base,
+                    codigo_turno, regimen, turno_base, subindice, tipo_turno, deposito_base, rol,
                     toma_servicio, deje_servicio, duracion_jornada, tiempo_toma, tiempo_deje,
                     itinerario_vigente, observaciones_turno, activo, sync_status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now', 'localtime'), datetime('now', 'localtime'))""",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now', 'localtime'), datetime('now', 'localtime'))""",
                 (
-                    codigo, regimen, base, payload.get("subindice"), tipo, deposito,
+                    codigo, regimen, base, payload.get("subindice"), tipo, deposito, rol,
                     payload.get("toma_servicio"), payload.get("deje_servicio"),
                     payload.get("duracion_jornada"), payload.get("tiempo_toma"), payload.get("tiempo_deje"),
                     itinerario, payload.get("observaciones_turno"), int(payload.get("activo", 1)),
@@ -3730,6 +3896,8 @@ class RecordsService:
 
             audit_payload = dict(payload)
             audit_payload["regimen"] = regimen
+            audit_payload["deposito_base"] = deposito
+            audit_payload["rol"] = rol
             audit_payload["vueltas_count"] = len(vueltas or [])
             self._audit(conn, user_id, windows_user, "crear", "turno_itinerario", turno_id, None, audit_payload)
             self._enqueue_sync(conn, "turnos_itinerario", turno_id, "INSERT", audit_payload)
@@ -3751,7 +3919,7 @@ class RecordsService:
         if not base:
             base = codigo.split(".")[0]
 
-        deposito = str(payload.get("deposito_base") or "PC").strip()
+        deposito = normalizar_deposito_turno(payload.get("deposito_base") or "PC") or "PC"
         tipo = str(payload.get("tipo_turno") or "DIAGRAMA_6D").strip()
         itinerario = str(payload.get("itinerario_vigente") or "45").strip()
 
@@ -3760,28 +3928,35 @@ class RecordsService:
             if not before:
                 raise ValueError("El turno no existe.")
 
-            reg_fallback = dict(before).get("regimen") or "TODOS"
+            before_dict = dict(before)
+            reg_fallback = before_dict.get("regimen") or "TODOS"
             reg_raw = payload.get("regimen") or payload.get("dia")
             regimen = self.normalizar_regimen_turno(reg_raw, default=reg_fallback) if reg_raw is not None else reg_fallback
 
+            rol_fallback = before_dict.get("rol") or "TODOS"
+            rol_raw = payload.get("rol")
+            rol = normalizar_rol_turno(rol_raw, default=rol_fallback) if rol_raw is not None else rol_fallback
+
             dup = conn.execute(
-                "SELECT id FROM turnos_itinerario WHERE codigo_turno = ? AND regimen = ? AND itinerario_vigente = ? AND id != ?",
-                (codigo, regimen, itinerario, turno_id),
+                """SELECT id FROM turnos_itinerario
+                   WHERE codigo_turno = ? AND regimen = ? AND itinerario_vigente = ?
+                     AND deposito_base = ? AND rol = ? AND id != ?""",
+                (codigo, regimen, itinerario, deposito, rol, turno_id),
             ).fetchone()
             if dup:
                 raise ValueError(
-                    f"Ya existe otro turno '{codigo}' para '{self.formatear_regimen_turno(regimen)}' e itinerario '{itinerario}'."
+                    f"Ya existe otro turno '{codigo}' para '{self.formatear_regimen_turno(regimen)}', depósito '{deposito}', rol '{rol}' e itinerario '{itinerario}'."
                 )
 
             conn.execute(
                 """UPDATE turnos_itinerario SET
-                    codigo_turno = ?, regimen = ?, turno_base = ?, subindice = ?, tipo_turno = ?, deposito_base = ?,
+                    codigo_turno = ?, regimen = ?, turno_base = ?, subindice = ?, tipo_turno = ?, deposito_base = ?, rol = ?,
                     toma_servicio = ?, deje_servicio = ?, duracion_jornada = ?, tiempo_toma = ?, tiempo_deje = ?,
                     itinerario_vigente = ?, observaciones_turno = ?, activo = ?,
                     sync_status = 'pending', updated_at = datetime('now', 'localtime')
                 WHERE id = ?""",
                 (
-                    codigo, regimen, base, payload.get("subindice"), tipo, deposito,
+                    codigo, regimen, base, payload.get("subindice"), tipo, deposito, rol,
                     payload.get("toma_servicio"), payload.get("deje_servicio"),
                     payload.get("duracion_jornada"), payload.get("tiempo_toma"), payload.get("tiempo_deje"),
                     itinerario, payload.get("observaciones_turno"), int(payload.get("activo", 1)),
@@ -3806,7 +3981,9 @@ class RecordsService:
 
             after = dict(payload)
             after["regimen"] = regimen
-            self._audit(conn, user_id, windows_user, "modificar", "turno_itinerario", turno_id, dict(before), after)
+            after["deposito_base"] = deposito
+            after["rol"] = rol
+            self._audit(conn, user_id, windows_user, "modificar", "turno_itinerario", turno_id, before_dict, after)
             self._enqueue_sync(conn, "turnos_itinerario", turno_id, "UPDATE", after)
 
     def cambiar_estado_turno(
@@ -3938,6 +4115,7 @@ class RecordsService:
         deposito: Optional[str] = None,
         itinerario: Optional[str] = None,
         regimen: Optional[str] = None,
+        rol: Optional[str] = None,
         incluir_inactivos: bool = True,
         user_id: Optional[int] = None,
         windows_user: Optional[str] = None,
@@ -3948,6 +4126,7 @@ class RecordsService:
             deposito=deposito,
             itinerario=itinerario,
             regimen=regimen,
+            rol=rol,
             incluir_inactivos=incluir_inactivos,
         )
         with self.db.write_transaction() as conn:
@@ -3981,6 +4160,7 @@ class RecordsService:
                         "deposito": deposito,
                         "itinerario": itinerario,
                         "regimen": regimen,
+                        "rol": rol,
                         "incluir_inactivos": incluir_inactivos,
                     },
                     "eliminados": len(ids),
@@ -5857,13 +6037,17 @@ class RecordsService:
             if not turno_objetivo:
                 raise ValueError("El agente no tiene un turno asignado y no se indicó un código de turno.")
 
-            # Buscar turnos coincidentes por codigo_turno o turno_base
-            params_t: List[Any] = [turno_objetivo, turno_objetivo]
+            # Buscar turnos coincidentes con normalización tolerante + rol y depósito del empleado
+            turno_norm = normalizar_clave_turno(turno_objetivo)
+            base_sin_sub = turno_objetivo.split(".")[0].strip() if "." in turno_objetivo else ""
+            base_sin_sub_norm = normalizar_clave_turno(base_sin_sub) if base_sin_sub else ""
+
+            params_t: List[Any] = []
             sql_t = """
-                SELECT id, codigo_turno, regimen, turno_base, itinerario_vigente
+                SELECT id, codigo_turno, regimen, turno_base, deposito_base,
+                       COALESCE(NULLIF(TRIM(rol), ''), 'TODOS') AS rol, itinerario_vigente
                 FROM turnos_itinerario
                 WHERE activo = 1
-                  AND (UPPER(TRIM(codigo_turno)) = UPPER(TRIM(?)) OR UPPER(TRIM(turno_base)) = UPPER(TRIM(?)))
             """
             if regimen and regimen not in ("Todos", "TODOS"):
                 sql_t += " AND UPPER(TRIM(regimen)) = UPPER(TRIM(?))"
@@ -5872,23 +6056,39 @@ class RecordsService:
                 sql_t += " AND TRIM(itinerario_vigente) = TRIM(?)"
                 params_t.append(itin_filtro)
             sql_t += " ORDER BY itinerario_vigente DESC, id DESC"
-            turnos_rows = [dict(r) for r in conn.execute(sql_t, params_t).fetchall()]
+            all_t_rows = [dict(r) for r in conn.execute(sql_t, params_t).fetchall()]
 
-            if not turnos_rows and "." in turno_objetivo:
-                # Fallback: buscar por turno_base antes del punto (ej. 401.1 -> 401)
-                base_sin_sub = turno_objetivo.split(".")[0].strip()
-                params_fb: List[Any] = [base_sin_sub]
-                sql_fb = """SELECT id, codigo_turno, regimen, turno_base, itinerario_vigente
-                            FROM turnos_itinerario
-                            WHERE activo = 1 AND UPPER(TRIM(turno_base)) = UPPER(TRIM(?))"""
-                if regimen and regimen not in ("Todos", "TODOS"):
-                    sql_fb += " AND UPPER(TRIM(regimen)) = UPPER(TRIM(?))"
-                    params_fb.append(regimen)
-                if itin_filtro:
-                    sql_fb += " AND TRIM(itinerario_vigente) = TRIM(?)"
-                    params_fb.append(itin_filtro)
-                sql_fb += " ORDER BY itinerario_vigente DESC, id DESC"
-                turnos_rows = [dict(r) for r in conn.execute(sql_fb, params_fb).fetchall()]
+            def _match_turno_emp(t_row: Dict[str, Any], usar_base_sin_sub: bool = False) -> bool:
+                c_cod = str(t_row.get("codigo_turno") or "").strip()
+                c_base = str(t_row.get("turno_base") or "").strip()
+                if not usar_base_sin_sub:
+                    if c_cod.upper() == turno_objetivo.upper() or c_base.upper() == turno_objetivo.upper():
+                        return True
+                    if turno_norm and (normalizar_clave_turno(c_cod) == turno_norm or normalizar_clave_turno(c_base) == turno_norm):
+                        return True
+                    return False
+                if base_sin_sub and c_base.upper() == base_sin_sub.upper():
+                    return True
+                if base_sin_sub_norm and normalizar_clave_turno(c_base) == base_sin_sub_norm:
+                    return True
+                return False
+
+            turnos_rows = [t for t in all_t_rows if _match_turno_emp(t, usar_base_sin_sub=False)]
+            if not turnos_rows and base_sin_sub:
+                turnos_rows = [t for t in all_t_rows if _match_turno_emp(t, usar_base_sin_sub=True)]
+
+            # Filtrar por rol y dotación del empleado si existen coincidencias compatibles
+            compat_rol_dep = [
+                t for t in turnos_rows
+                if coincide_rol_empleado(t.get("rol"), emp.get("especialidad"))
+                and coincide_deposito_empleado(t.get("deposito_base"), emp.get("dotacion"))
+            ]
+            if compat_rol_dep:
+                turnos_rows = compat_rol_dep
+            else:
+                compat_rol = [t for t in turnos_rows if coincide_rol_empleado(t.get("rol"), emp.get("especialidad"))]
+                if compat_rol:
+                    turnos_rows = compat_rol
 
             if not turnos_rows:
                 return {
@@ -5904,6 +6104,7 @@ class RecordsService:
             exactos = [
                 t for t in turnos_rows
                 if str(t["codigo_turno"]).strip().upper() == turno_objetivo.upper()
+                or (turno_norm and normalizar_clave_turno(t["codigo_turno"]) == turno_norm)
             ]
             seleccionados = exactos or turnos_rows
             itin_max = seleccionados[0]["itinerario_vigente"]
@@ -6082,7 +6283,8 @@ class RecordsService:
 
         with self.db.read_connection() as conn:
             sql_t = """
-                SELECT id, codigo_turno, regimen, turno_base, itinerario_vigente
+                SELECT id, codigo_turno, regimen, turno_base, deposito_base,
+                       COALESCE(NULLIF(TRIM(rol), ''), 'TODOS') AS rol, itinerario_vigente
                 FROM turnos_itinerario
                 WHERE activo = 1
             """
@@ -6098,13 +6300,20 @@ class RecordsService:
 
             por_codigo: Dict[str, List[Dict[str, Any]]] = {}
             por_base: Dict[str, List[Dict[str, Any]]] = {}
+            por_norm: Dict[str, List[Dict[str, Any]]] = {}
             for t in turnos_all:
                 cod_k = str(t.get("codigo_turno") or "").strip().upper()
                 base_k = str(t.get("turno_base") or "").strip().upper()
+                cod_n = normalizar_clave_turno(cod_k)
+                base_n = normalizar_clave_turno(base_k)
                 if cod_k:
                     por_codigo.setdefault(cod_k, []).append(t)
                 if base_k:
                     por_base.setdefault(base_k, []).append(t)
+                if cod_n:
+                    por_norm.setdefault(cod_n, []).append(t)
+                if base_n and base_n != cod_n:
+                    por_norm.setdefault(base_n, []).append(t)
 
             vueltas_por_turno: Dict[int, List[Dict[str, Any]]] = {}
             trenes_unicos: set[str] = set()
@@ -6225,10 +6434,26 @@ class RecordsService:
                 continue
 
             tk = turno_emp.upper()
-            candidatos = por_codigo.get(tk) or por_base.get(tk) or []
+            tk_norm = normalizar_clave_turno(turno_emp)
+            candidatos = por_codigo.get(tk) or por_base.get(tk) or (por_norm.get(tk_norm) if tk_norm else None) or []
             if not candidatos and "." in tk:
                 base_sin_sub = tk.split(".")[0].strip()
-                candidatos = por_base.get(base_sin_sub) or []
+                base_sin_sub_n = normalizar_clave_turno(base_sin_sub)
+                candidatos = por_base.get(base_sin_sub) or (por_norm.get(base_sin_sub_n) if base_sin_sub_n else None) or []
+
+            # Priorizar coincidencias compatibles en rol y dotación del empleado
+            if candidatos:
+                compat_rd = [
+                    t for t in candidatos
+                    if coincide_rol_empleado(t.get("rol"), emp.get("especialidad"))
+                    and coincide_deposito_empleado(t.get("deposito_base"), emp.get("dotacion"))
+                ]
+                if compat_rd:
+                    candidatos = compat_rd
+                else:
+                    compat_r = [t for t in candidatos if coincide_rol_empleado(t.get("rol"), emp.get("especialidad"))]
+                    if compat_r:
+                        candidatos = compat_r
 
             if not candidatos:
                 agentes_omitidos += 1
@@ -6240,7 +6465,11 @@ class RecordsService:
                 registros.append(base_reg)
                 continue
 
-            exactos = [t for t in candidatos if str(t.get("codigo_turno") or "").strip().upper() == tk]
+            exactos = [
+                t for t in candidatos
+                if str(t.get("codigo_turno") or "").strip().upper() == tk
+                or (tk_norm and normalizar_clave_turno(t.get("codigo_turno")) == tk_norm)
+            ]
             seleccionados = exactos or candidatos
             itin_max = str(seleccionados[0].get("itinerario_vigente") or "").strip()
             seleccionados = [t for t in seleccionados if str(t.get("itinerario_vigente") or "").strip() == itin_max]

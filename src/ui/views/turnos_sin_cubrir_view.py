@@ -239,6 +239,8 @@ class TurnosSinCubrirView(QWidget):
             self.records_service,
             codigo_turno=cod_turno,
             regimen_inicial=reg_init,
+            deposito_inicial=str(row_data.get("dotacion") or "").strip() or None,
+            rol_inicial=str(row_data.get("especialidad") or "").strip() or None,
             parent=self,
         )
         dlg.exec()

@@ -255,6 +255,14 @@ class BuscadorTurnosView(QWidget):
         self.combo_servicio.currentIndexChanged.connect(self.consultar)
         row2.addWidget(self.combo_servicio)
 
+        row2.addWidget(QLabel("Rol:"))
+        self.combo_rol = QComboBox()
+        self.combo_rol.addItem("Todos", "Todos")
+        self.combo_rol.addItem("Conductor", "Conductor")
+        self.combo_rol.addItem("Guarda", "Guarda")
+        self.combo_rol.currentIndexChanged.connect(self.consultar)
+        row2.addWidget(self.combo_rol)
+
         row2.addWidget(QLabel("Itinerarios:"))
         self.combo_itinerarios = CheckableComboBox(placeholder="Todos los itinerarios")
         self.combo_itinerarios.selectionChanged.connect(lambda _: self.consultar())
@@ -274,11 +282,11 @@ class BuscadorTurnosView(QWidget):
         lay_turnos = QVBoxLayout(grp_turnos)
 
         headers_turnos = [
-            "CÓDIGO TURNO", "DÍA", "BASE", "TIPO", "DEPÓSITO", "TOMA", "DEJE", "DURACIÓN",
+            "CÓDIGO TURNO", "DÍA", "ROL", "BASE", "TIPO", "DEPÓSITO", "TOMA", "DEJE", "DURACIÓN",
             "TITULAR / REEMPLAZO ASIGNADO", "ESTADO / COBERTURA", "ITINERARIO",
         ]
         keys_turnos = [
-            "codigo_turno", "regimen_label", "turno_base", "tipo_turno", "deposito_base", "toma_servicio",
+            "codigo_turno", "regimen_label", "rol", "turno_base", "tipo_turno", "deposito_base", "toma_servicio",
             "deje_servicio", "duracion_jornada", "titular", "cobertura", "itinerario_vigente",
         ]
 
@@ -305,15 +313,16 @@ class BuscadorTurnosView(QWidget):
         self.table_turnos.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table_turnos.setColumnWidth(0, 95)
         self.table_turnos.setColumnWidth(1, 85)
-        self.table_turnos.setColumnWidth(2, 75)
-        self.table_turnos.setColumnWidth(3, 85)
-        self.table_turnos.setColumnWidth(4, 75)
-        self.table_turnos.setColumnWidth(5, 70)
+        self.table_turnos.setColumnWidth(2, 85)
+        self.table_turnos.setColumnWidth(3, 75)
+        self.table_turnos.setColumnWidth(4, 85)
+        self.table_turnos.setColumnWidth(5, 75)
         self.table_turnos.setColumnWidth(6, 70)
-        self.table_turnos.setColumnWidth(7, 80)
-        self.table_turnos.setColumnWidth(8, 210)
-        self.table_turnos.horizontalHeader().setSectionResizeMode(9, QHeaderView.Stretch)
-        self.table_turnos.setColumnWidth(10, 95)
+        self.table_turnos.setColumnWidth(7, 70)
+        self.table_turnos.setColumnWidth(8, 80)
+        self.table_turnos.setColumnWidth(9, 210)
+        self.table_turnos.horizontalHeader().setSectionResizeMode(10, QHeaderView.Stretch)
+        self.table_turnos.setColumnWidth(11, 95)
         self.table_turnos.selectionModel().selectionChanged.connect(self._on_turno_seleccionado)
         lay_turnos.addWidget(self.table_turnos)
         splitter.addWidget(grp_turnos)
@@ -437,6 +446,8 @@ class BuscadorTurnosView(QWidget):
 
         fecha_iso = self.date_picker.date().toString("yyyy-MM-dd")
         tipo_dia = self.combo_servicio.currentText()
+        rol_sel = self.combo_rol.currentData()
+        rol_param = None if rol_sel in (None, "", "Todos") else str(rol_sel)
 
         itis_sel = self.combo_itinerarios.get_checked_items()
         lista_itis = itis_sel if itis_sel else None
@@ -446,6 +457,7 @@ class BuscadorTurnosView(QWidget):
             fecha_target_iso=fecha_iso,
             tipo_dia=tipo_dia,
             itinerarios=lista_itis,
+            rol=rol_param,
         )
         self.model_turnos.set_data(self._turnos_resultados)
 
@@ -508,6 +520,7 @@ class BuscadorTurnosView(QWidget):
     def _limpiar_filtros(self) -> None:
         self.txt_criterio.clear()
         self.date_picker.setDate(QDate.currentDate())
+        self.combo_rol.setCurrentIndex(0)
         self.combo_itinerarios.set_items(self.records_service.listar_itinerarios_disponibles())
         self.consultar()
 
