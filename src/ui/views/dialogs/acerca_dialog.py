@@ -60,7 +60,9 @@ class AcercaDialog(BaseDialog):
         lbl_app.setStyleSheet("font-size: 13pt; font-weight: 700; color: #1E3A8A;")
         lbl_sub = QLabel("Sistema de Gestión Operativa Ferroviaria y Control de Dotación")
         lbl_sub.setStyleSheet("font-size: 9.5pt; color: #64748B;")
-        lbl_ver = QLabel("<b>Versión 2.0.0</b> • <i>Estándar Arquitectónico CRONO-PCT</i>")
+        from src.core.config import APP_VERSION
+
+        lbl_ver = QLabel(f"<b>Versión {APP_VERSION}</b> • <i>Estándar Arquitectónico CRONO-PCT</i>")
         lbl_ver.setStyleSheet("font-size: 9.5pt; color: #0284C7;")
 
         title_layout.addWidget(lbl_app)
@@ -83,7 +85,7 @@ class AcercaDialog(BaseDialog):
         form.setLabelAlignment(Qt.AlignRight)
         form.setSpacing(10)
 
-        form.addRow("<b>Versión Runtime:</b>", QLabel("RENO v2.0.0 Enterprise"))
+        form.addRow("<b>Versión Runtime:</b>", QLabel(f"RENO v{APP_VERSION} Enterprise"))
         form.addRow("<b>Framework GUI:</b>", QLabel("PySide6-Essentials (Qt 6.7+ Python Native)"))
         form.addRow("<b>Persistencia Híbrida:</b>", QLabel("SQLite WAL / DELETE Local-First + Outbox Queue"))
         form.addRow("<b>Sincronización Nube:</b>", QLabel("PostgreSQL 15+ REST (Supabase Engine, esquema reno_*)"))
@@ -114,7 +116,16 @@ class AcercaDialog(BaseDialog):
             .badge { background-color: #E0F2FE; color: #0369A1; padding: 2px 6px; border-radius: 4px; font-weight: bold; }
         </style>
 
-        <h3>Versión 2.0.0 <span class="badge">ACTUAL</span></h3>
+        <h3>Versión 2.1.0 <span class="badge">ACTUAL</span></h3>
+        <h4>Turnos de Itinerario por Rol, Dotación y Normalización Tolerante:</h4>
+        <ul>
+            <li><b>Distinción de Rol (Conductor / Guarda):</b> Nuevo campo <code>rol</code> y clave única ampliada <code>(codigo_turno, regimen, itinerario_vigente, deposito_base, rol)</code> en SQLite y Supabase para evitar sobrescrituras entre turnos homónimos.</li>
+            <li><b>Importación Limpia desde Matrices de Turnos:</b> Soporte nativo para columnas explícitas <code>turno_normalizado</code>, <code>rol</code>, <code>dotacion</code> y <code>dia</code> manteniendo retrocompatibilidad con archivos legacy.</li>
+            <li><b>Normalización Tolerante con Padrón de Empleados:</b> Cruce inteligente entre <code>Programa 01</code>, <code>Programa 1</code> y <code>Prog.1</code>, y unificación de especialidades Eléctrico/Diesel para Conductores y Guardas en buscador, cobertura, calendario de ciclo y conocimiento de vía.</li>
+            <li><b>Filtros y Columnas de Rol en UI:</b> Integración de filtro y columna <code>ROL</code> en Buscador de Turnos, Administración de Turnos y formularios de detalle/edición.</li>
+        </ul>
+
+        <h3>Versión 2.0.0</h3>
         <h4>Reorganización y Estándar CRONO-PCT:</h4>
         <ul>
             <li><b>Nueva Navegación por Pestañas Integradas:</b> Panel de Control, Buscador de Turnos, Novedades y Cambios, Turnos Sin Cubrir, Empleados (BASE), Personal de Ciclo y Administración.</li>

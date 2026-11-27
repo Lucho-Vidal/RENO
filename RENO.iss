@@ -3,7 +3,7 @@
 ; Compatible con instalación desatendida y auto-updater silencioso sin permisos administrativos.
 
 #define MyAppName "RENO"
-#define MyAppVersion "2.0.0"
+#define MyAppVersion "2.1.0"
 #define MyAppPublisher "Trenes Argentinos - luvidev"
 #define MyAppURL "https://luciano-vidal.web.app/"
 #define MyAppExeName "RENO.exe"

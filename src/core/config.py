@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "RENO"
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 APP_VERSION = VERSION
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent

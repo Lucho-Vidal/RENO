@@ -1,6 +1,6 @@
-# Script de compilación de RENO v2.0.0 a ejecutable autónomo (.exe)
+# Script de compilación de RENO v2.1.0 a ejecutable autónomo (.exe)
 Write-Host "====================================================" -ForegroundColor Cyan
-Write-Host "  Iniciando empaquetado de RENO v2.0.0..." -ForegroundColor Cyan
+Write-Host "  Iniciando empaquetado de RENO v2.1.0..." -ForegroundColor Cyan
 Write-Host "====================================================" -ForegroundColor Cyan
 
 $pythonCmd = "python"
